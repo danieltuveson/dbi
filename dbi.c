@@ -1,21 +1,16 @@
 // https://en.wikipedia.org/wiki/Tiny_BASIC
 // http://www.ittybittycomputers.com/ittybitty/tinybasic/TBuserMan.txt
 
-char *quote =
-"“It is practically impossible to teach good programming to students\n"
-"that have had a prior exposure to BASIC: as potential programmers\n"
-"they are mentally mutilated beyond hope of regeneration.”\n"
-"― Edsger Dijkstra";
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <assert.h>
 #include <string.h>
 #include <ctype.h>
 
 // Hardcoded so max of 4 digit numbers for GOTOs and such
-#define MAX_PROG_SIZE 1000
+#define MAX_PROG_SIZE 10000
 
 // Hardcoded since variables can be A-Z
 #define MAX_VARS 26
@@ -25,6 +20,7 @@ char *quote =
 #define MAX_STACK 100
 #define MAX_LINE_MEM 16
 #define MAX_LINE_PROGRAM 32
+#define MAX_SUB_DEPTH 32
 
 // Toggling turns on some debug printing
 #define DEBUG 0
@@ -71,21 +67,21 @@ struct TokenMapping {
 };
 
 struct TokenMapping token_map[] = {
-    { "PRINT",  PRINT,  "print concatenated expression list", "PRINT expr-list" },
-    { "IF",     IF,     "conditionally execute statement",    "IF expr relop expr THEN stmt" },
-    { "GOTO",   GOTO,   "jump to given line number",                   "GOTO expr" },
-    { "INPUT",  INPUT,  "get user input(s) and assign to variable(s)", "INPUT var-list" },
-    { "LET",    LET,    "set variable to expression",                  "LET var = expr" },
-    { "GOSUB",  GOSUB,  "jump to given line number",                   "GOSUB expr" },
-    { "RETURN", RETURN, "return to next line of last GOSUB called",    "RETURN" },
-    { "CLEAR",  CLEAR,  "delete loaded code",                          "CLEAR" },
-    { "LIST",   LIST,   "print out loaded code",                       "LIST" },
-    { "RUN",    RUN,    "execute loaded code",                         "RUN" },
-    { "END",    END,    "end execution of program",                    "END" },
-    { "REM",    REM,    "adds a comment",                              "REM comment" },
-    { "DIM",    DIM,    "creates array",                               "DIM (TBD)" },
-    { "HELP",   HELP,   "you just ran this",                           "HELP" },
-    { "QUOTE",  QUOTE,  "???",                                         "QUOTE" },
+    { "PRINT",  PRINT,  "print concatenated expression list",                 "PRINT expr-list" },
+    { "IF",     IF,     "conditionally execute statement",       "IF expr relop expr THEN stmt" },
+    { "GOTO",   GOTO,   "jump to given line number",                          "GOTO expr" },
+    { "INPUT",  INPUT,  "get user input(s) and assign to variable(s)",        "INPUT var-list" },
+    { "LET",    LET,    "set variable to expression",                         "LET var = expr" },
+    { "GOSUB",  GOSUB,  "jump to given line number",                          "GOSUB expr" },
+    { "RETURN", RETURN, "return to the line following the last GOSUB called", "RETURN" },
+    { "CLEAR",  CLEAR,  "delete loaded code",                                 "CLEAR" },
+    { "LIST",   LIST,   "print out loaded code",                              "LIST" },
+    { "RUN",    RUN,    "execute loaded code",                                "RUN" },
+    { "END",    END,    "end execution of program",                           "END" },
+    { "REM",    REM,    "adds a comment",                                     "REM comment" },
+    { "DIM",    DIM,    "creates array",                                      "DIM (TBD)" },
+    { "HELP",   HELP,   "you just ran this",                                  "HELP" },
+    { "QUOTE",  QUOTE,  "???",                                                "QUOTE" },
 };
 
 int token_map_size = sizeof(token_map) / sizeof(*token_map);
@@ -105,7 +101,7 @@ struct GrammarMapping grammar_map[] = {
     { "number", "digit digit*" },
     { "digit", "0 | 1 | 2 | 3 | ... | 8 | 9" },
     { "relop", "< (>|=|ε) | > (<|=|ε) | =" },
-    { "string", "\" ( |!|#|$ ... -|.|/|digit|: ... @|A|B|C ... |X|Y|Z)* \"" },
+    { "string", "\" (non-quote-characters)* \"" },
 };
 
 int grammar_map_size = sizeof(grammar_map) / sizeof(*grammar_map);
@@ -123,7 +119,7 @@ void print_help(void)
     print_line();
     printf(" %-8s|  %-45s|  %-25s\n", "command", "description", "usage");
     for (int i = 0; i < 90; i++) {
-        if (i == 9 || i == 56) {
+        if (i == 9 || i == 57) {
             putchar('+');
         } else {
             putchar('-');
@@ -153,6 +149,12 @@ void print_intro(void)
     printf("press ctrl+d or type 'end' to exit\n");
     printf("type 'help' for a list of commands\n");
 }
+
+char *quote =
+"“It is practically impossible to teach good programming to students\n"
+"that have had a prior exposure to BASIC: as potential programmers\n"
+"they are mentally mutilated beyond hope of regeneration.”\n"
+"― Edsger Dijkstra";
 
 // *******************************************************************
 // ************************** Basic Objects **************************
@@ -295,7 +297,7 @@ enum Opcode {
     OP_PRINT,
     OP_IF,
     OP_GOTO,
-    OP_SUBPOP,
+    OP_SUBPUSH,
     OP_INPUT,
     OP_LET,
     OP_RETURN,
@@ -325,15 +327,23 @@ void ignore_whitespace(char **input_ptr)
 // -1 on error
 int parse_lineno(char *input, int *lineno)
 {
+    if (!isdigit(*input)) {
+        *lineno = 0;
+        return 0;
+    }
     *lineno = 0;
     int i = 0;
     while (isdigit(input[i])) {
         if (i > 4) {
-            printf("Error: line number too large\n");
+            printf("Error: line number exceeds maximum value of %d\n", MAX_PROG_SIZE - 1);
             return -1;
         }
         *lineno = *lineno * 10 + input[i] - '0';
         i++;
+    }
+    if (*lineno == 0) {
+        printf("Error: line number cannot be 0\n");
+        return -1;
     }
     return i;
 }
@@ -408,50 +418,69 @@ int compile_string(char *input, int mem_index, struct BObject **memory,
 // TODO: Make this handle non-literal expressions
 // Need to add error code for when this can allocate multiple slots in memory / multiple
 // bytes in the bytecode array
+#define push_op(op)\
+    stack[++op_stack_offset]
+
+#define pop_op()\
+    stack[op_stack_offset--]
+
 int compile_expr(char *input, int *mem_index, struct BObject **memory, 
         int *byte_index, uint8_t *bytecode)
 {
     char *str_start = input;
 
-    int sign = 1;
-    if (*input == '-') {
-        sign = -1;
-        input++;
-    } else if (*input == '+') {
-        input++;
-    }
-    ignore_whitespace(&input);
-    if (*input == '\0') {
-        printf("Error: unexpected end of number\n");
-        mem_clear(memory, *mem_index);
-        return 0;
-    }
+    // int sign = 1;
+    // if (*input == '-') {
+    //     sign = -1;
+    //     input++;
+    // } else if (*input == '+') {
+    //     input++;
+    // }
 
-    int num = 0;
-    while (isdigit(*input)) {
-        num = 10 * num + *input - '0';
-        input++;
+    // Shunting yard
+    char op_stack[MAX_STACK];
+    int op_stack_offset = 0;
+    while (*input != '\0') {
+        ignore_whitespace(&input);
+        if (isdigit(*input)) {
+
+        } else {
+            printf("Error: expected number or variable\n");
+            mem_clear(memory, *mem_index);
+            return 0;
+        }
+
+        int num = 0;
+        while (isdigit(*input)) {
+            num = 10 * num + *input - '0';
+            input++;
+        }
+        ignore_whitespace(&input);
+        if (*input != '\0') {
+            printf("Error: unexpected characters in number\n");
+            mem_clear(memory, *mem_index);
+            return 0;
+        }
+
+        // Add numeric literal to memory
+        memory[*mem_index] = bint_new(num);
+        *mem_index = *mem_index + 1;
+
+        // Add location of object to bytecode
+        bytecode[*byte_index] = OP_PUSH;
+        *byte_index = *byte_index + 1;
+        bytecode[*byte_index] = *mem_index - 1;
+        *byte_index = *byte_index + 1;
     }
-
-    // Add numeric literal to memory
-    memory[*mem_index] = bint_new(sign * num);
-    *mem_index = *mem_index + 1;
-
-    // Add location of string object to bytecode
-    bytecode[*byte_index] = OP_PUSH;
-    *byte_index = *byte_index + 1;
-    bytecode[*byte_index] = *mem_index - 1;
-    *byte_index = *byte_index + 1;
 
     return input - str_start;
 }
 
-// Returns number of bytecodes added
-int compile_solo_expr(char *input, int *mem_index, struct BObject **memory, uint8_t *bytecode)
+// 1 if success, 0 if fail
+int compile_solo_expr(char *input, int *mem_index, struct BObject **memory,
+        int *byte_index, uint8_t *bytecode)
 {
-    *mem_index = 0;
-    int byte_index = 0;
-    int char_count = compile_expr(input, mem_index, memory, &byte_index, bytecode);
+    int char_count = compile_expr(input, mem_index, memory, byte_index, bytecode);
     if (char_count == 0) {
         mem_clear(memory, *mem_index);
         return 0;
@@ -463,7 +492,7 @@ int compile_solo_expr(char *input, int *mem_index, struct BObject **memory, uint
         mem_clear(memory, *mem_index);
         return 0;
     }
-    return byte_index;
+    return 1;
 }
 
 // Returns number of bytecodes added
@@ -535,6 +564,7 @@ int compile_expr_list(char *input, int *mem_index, struct BObject **memory, uint
 struct Statement *compile_command(char *input, struct BObject **temp_memory, uint8_t *bytecode)
 {
     char *init_input = input;
+    ignore_whitespace(&input);
 
     // Get line number
     int lineno = 0;
@@ -571,12 +601,11 @@ struct Statement *compile_command(char *input, struct BObject **temp_memory, uin
         case LET:
             break;
         case GOSUB:
+            bytecode[byte_count++] = OP_SUBPUSH;
             bytecode[byte_count++] = lineno + 1;
-            bytecode[byte_count++] = OP_SUBPOP;
             /* fall through */
         case GOTO:
-            byte_count = compile_solo_expr(input, &mem_count, temp_memory, bytecode);
-            if (byte_count == 0) {
+            if (!compile_solo_expr(input, &mem_count, temp_memory, &byte_count, bytecode)) {
                 return NULL;
             }
             if (byte_count >= MAX_LINE_PROGRAM) {
@@ -671,26 +700,51 @@ struct Statement *statement_next(struct Statement **program, int lineno)
     return NULL;
 }
 
-#define push(stack, val)\
+static void runtime_error(struct Statement *stmt, const char *fmt, ...)
+{
+    if (stmt->lineno == 0) {
+        printf("Error: ");
+    } else {
+        printf("Error at line %d: ", stmt->lineno);
+    }
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    printf("\n");
+}
+
+#define push(val)\
     memcpy(&(stack[++stack_offset]), val, sizeof(*val))
 
-#define pop(stack)\
+#define pop()\
     &(stack[stack_offset--])
 
-#define push_sub(substack, line)\
+#define push_sub(line)\
     substack[++substack_offset] = line
 
-#define pop_sub(substack)\
+#define pop_sub()\
     substack[substack_offset--]
 
-enum Status execute_statement(struct Statement *stmt, struct BObject **vars,
+enum Status execute_statement(
+        struct Statement *stmt,
+        struct BObject **vars,
         struct Statement **program)
 {
     enum Status status = STATUS_GOOD;
+
     int stack_offset = 0;
     struct BObject stack[MAX_STACK];
-    static int substack_offset = 0;
-    static int substack[MAX_STACK];
+
+    int substack_offset = 0;
+    int substack[MAX_STACK];
+
+    struct BObject *obj;
+    int mem_loc, line;
+    int has_print = 0;
+    int ip = 0;
+    while (1) {
+        uint8_t op = stmt->bytecode[ip];
 #if DEBUG
     printf("stmt->byte_count:%d\n", stmt->byte_count);
     printf("stmt->mem_count:%d\n", stmt->mem_count);
@@ -701,22 +755,21 @@ enum Status execute_statement(struct Statement *stmt, struct BObject **vars,
         printf("%d", stmt->bytecode[i]);
     }
     printf("}\n");
+    printf("op: %d\n", op);
 #endif
-    int mem_loc, has_print;
-    has_print = 0;
-    struct BObject *obj;
-    int ip = 0;
-    while (1) {
-        uint8_t op = stmt->bytecode[ip];
         switch (op) {
             case OP_NO:
                 break;
             case OP_PUSH:
                 mem_loc = stmt->bytecode[++ip];
-                push(stack, stmt->memory[mem_loc]);
+                if (stack_offset + 1 >= MAX_STACK) {
+                    runtime_error(stmt, "stack overflow");
+                    return STATUS_ERROR;
+                }
+                push(stmt->memory[mem_loc]);
                 break;
             case OP_PRINT:
-                obj = pop(stack);
+                obj = pop();
                 bobj_print(obj, vars);
                 has_print = 1;
                 break;
@@ -727,28 +780,40 @@ enum Status execute_statement(struct Statement *stmt, struct BObject **vars,
             case OP_LET:
                 break;
             case OP_GOTO:
-                obj = pop(stack);
+                obj = pop();
                 if (obj->type == BOB_VAR) {
                     obj = vars[obj->bvar];
                 }
                 if (obj->type != BOB_INT) {
-                    printf("Error at line %d: cannot goto non-integer\n", stmt->lineno);
+                    runtime_error(stmt, "cannot goto non-integer");
                     return STATUS_ERROR;
                 } else if (obj->bint <= 0 || obj->bint >= MAX_PROG_SIZE) {
-                    printf("Error at line %d: goto %d out of bounds\n", stmt->lineno, obj->bint);
+                    runtime_error(stmt, "goto %d out of bounds", obj->bint);
                     return STATUS_ERROR;
                 } else if (program[obj->bint] == NULL) {
-                    printf("Error at line %d: cannot goto %d, no such line\n", stmt->lineno,
-                            obj->bint);
+                    runtime_error(stmt, "cannot goto %d, no such line", obj->bint);
                     return STATUS_ERROR;
                 }
                 ip = 0;
                 stmt = program[obj->bint];
                 continue;
-            case OP_SUBPOP:
+            case OP_SUBPUSH:
+                line = stmt->bytecode[++ip];
+                push_sub(line);
                 break;
             case OP_RETURN:
-                break;
+                if (substack_offset <= 0) {
+                    runtime_error(stmt, "no outer subroutine to return to");
+                    return STATUS_ERROR;
+                }
+                line = pop_sub();
+                stmt = statement_next(program, line);
+                if (!stmt) {
+                    runtime_error(stmt, "could not return from subroutine");
+                    return STATUS_ERROR;
+                }
+                ip = 0;
+                continue;
             case OP_CLEAR:
                 program_clear(program);
                 break;
@@ -768,9 +833,10 @@ enum Status execute_statement(struct Statement *stmt, struct BObject **vars,
                 break;
             case OP_HELP:
                 print_help();
-                return STATUS_GOOD;
+                break;
             default:
                 printf("Internal error: unknown command encountered\n");
+                return STATUS_ERROR;
         }
         ip++;
         if (ip >= stmt->byte_count) {
@@ -792,16 +858,28 @@ enum Status execute_statement(struct Statement *stmt, struct BObject **vars,
     return status;
 }
 
-int main(void)
+void vars_init(struct BObject **vars)
 {
-    print_intro();
-
-    struct BObject *vars[MAX_VARS] = {0};
     for (int i = 0; i < MAX_VARS; i++) {
         vars[i] = malloc(sizeof(struct BObject));
         vars[i]->type = BOB_INT;
         vars[i]->bint = 0;
     }
+}
+
+void vars_free(struct BObject **vars)
+{
+    for (int i = 0; i < MAX_VARS; i++) {
+        free(vars[i]);
+    }
+}
+
+int main(void)
+{
+    print_intro();
+
+    struct BObject *vars[MAX_VARS] = {0};
+    vars_init(vars);
 
     char input[MAX_INPUT];
     struct BObject *temp_memory[MAX_LINE_MEM];
@@ -816,9 +894,6 @@ int main(void)
 
         printf("> ");
         if (!fgets(input, MAX_INPUT, stdin)) {
-            printf("Error reading input\n");
-            break;
-        } else if (feof(stdin)) {
             printf("\n");
             break;
         }
@@ -842,9 +917,7 @@ int main(void)
         }
     }
 
-    for (int i = 0; i < MAX_VARS; i++) {
-        free(vars[i]);
-    }
+    vars_free(vars);
     program_clear(program);
     free(program);
     return 0;
