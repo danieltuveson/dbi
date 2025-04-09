@@ -7,6 +7,7 @@
 #include <stdarg.h>
 #include <assert.h>
 #include <string.h>
+#include <errno.h>
 #include <ctype.h>
 
 // Hardcoded so max of 4 digit numbers for GOTOs and such
@@ -48,6 +49,8 @@ enum TokenType {
     END,
     REM,
     DIM,
+    LOAD,
+    SAVE,
     HELP,
     QUOTE,
     // Operators
@@ -79,7 +82,9 @@ struct TokenMapping token_map[] = {
     { "RUN",    RUN,    "execute loaded code",                                "RUN" },
     { "END",    END,    "end execution of program",                           "END" },
     { "REM",    REM,    "adds a comment",                                     "REM comment" },
-    { "DIM",    DIM,    "creates array",                                      "DIM (TBD)" },
+    { "LOAD",   LOAD,   "load code from file",                                "LOAD string" },
+    { "SAVE",   SAVE,   "save code to file",                                  "SAVE string" },
+    // { "DIM",    DIM,    "creates array",                                      "DIM (TBD)" },
     { "HELP",   HELP,   "you just ran this",                                  "HELP" },
     { "QUOTE",  QUOTE,  "???",                                                "QUOTE" },
 };
@@ -108,7 +113,7 @@ int grammar_map_size = sizeof(grammar_map) / sizeof(*grammar_map);
 
 void print_line(void)
 {
-    for (int i = 0; i < 90; i++) {
+    for (int i = 0; i < 97; i++) {
         putchar('-');
     }
     putchar('\n');
@@ -117,9 +122,9 @@ void print_line(void)
 void print_help(void)
 {
     print_line();
-    printf(" %-8s|  %-45s|  %-25s\n", "command", "description", "usage");
-    for (int i = 0; i < 90; i++) {
-        if (i == 9 || i == 57) {
+    printf(" %-8s|  %-52s|  %-25s\n", "command", "description", "usage");
+    for (int i = 0; i < 97; i++) {
+        if (i == 9 || i == 64) {
             putchar('+');
         } else {
             putchar('-');
@@ -128,7 +133,7 @@ void print_help(void)
     putchar('\n');
     for (int i = 0; i < token_map_size; i++) {
         struct TokenMapping tm = token_map[i];
-        printf(" %-8s|  %-45s|  %-25s\n", tm.str, tm.helpstr, tm.helpex);
+        printf(" %-8s|  %-52s|  %-25s\n", tm.str, tm.helpstr, tm.helpex);
     }
     print_line();
     for (int i = 0; i < grammar_map_size; i++) {
@@ -253,7 +258,7 @@ struct Statement *statement_new(int lineno, char *input, int mem_count, struct B
 
     // Memory
     stmt->mem_count = mem_count;
-    if (memory[0] != 0) {
+    if (mem_count != 0) {
         int size = sizeof(*stmt->memory) * mem_count;
         stmt->memory = malloc(size);
         memcpy(stmt->memory, memory, size);
@@ -263,7 +268,7 @@ struct Statement *statement_new(int lineno, char *input, int mem_count, struct B
 
     // Bytecode
     stmt->byte_count = byte_count;
-    if (bytecode[0] != 0) {
+    if (byte_count != 0) {
         stmt->bytecode = malloc(byte_count);
         memcpy(stmt->bytecode, bytecode, byte_count);
     } else {
@@ -305,7 +310,8 @@ enum Opcode {
     OP_LIST,
     OP_RUN,
     OP_END,
-    OP_REM,
+    OP_LOAD,
+    OP_SAVE,
     OP_DIM,
     OP_HELP,
     OP_LT,
@@ -349,10 +355,9 @@ int parse_lineno(char *input, int *lineno)
 }
 
 // Returns number of chars consumed
-int parse_command(char *input, enum TokenType *type)
+int parse_command_name(char *input, enum TokenType *type)
 {
     if (input[0] == '\0') {
-        printf("Error: empty line\n");
         return 0;
     }
     char command[7] = {0};
@@ -442,29 +447,42 @@ int compile_expr(char *input, int *mem_index, struct BObject **memory,
     int op_stack_offset = 0;
     while (*input != '\0') {
         ignore_whitespace(&input);
+
         if (isdigit(*input)) {
+            int num = 0;
+            while (isdigit(*input)) {
+                num = 10 * num + *input - '0';
+                input++;
+            }
 
-        } else {
-            printf("Error: expected number or variable\n");
-            mem_clear(memory, *mem_index);
-            return 0;
-        }
+            // Add numeric literal to memory
+            memory[*mem_index] = bint_new(num);
+            *mem_index = *mem_index + 1;
 
-        int num = 0;
-        while (isdigit(*input)) {
-            num = 10 * num + *input - '0';
+        } else if (('a' <= *input && *input <= 'z') || ('A' <= *input && *input <= 'Z')) {
+            
+            uint8_t var = *input >= 'a' ? *input - 'a' : *input - 'A';
             input++;
-        }
-        ignore_whitespace(&input);
-        if (*input != '\0') {
-            printf("Error: unexpected characters in number\n");
-            mem_clear(memory, *mem_index);
-            return 0;
+
+            // Add variable to memory
+            memory[*mem_index] = bvar_new(var);
+            *mem_index = *mem_index + 1;
+
+        // } else {
+        //     printf("Error: expected number or variable\n");
+        //     mem_clear(memory, *mem_index);
+        //     return 0;
+        } else {
+            break;
         }
 
-        // Add numeric literal to memory
-        memory[*mem_index] = bint_new(num);
-        *mem_index = *mem_index + 1;
+        // ignore_whitespace(&input);
+        // if (*input != '\0') {
+        //     printf("Error: unexpected characters in expression\n");
+        //     mem_clear(memory, *mem_index);
+        //     return 0;
+        // }
+
 
         // Add location of object to bytecode
         bytecode[*byte_index] = OP_PUSH;
@@ -480,8 +498,10 @@ int compile_expr(char *input, int *mem_index, struct BObject **memory,
 int compile_solo_expr(char *input, int *mem_index, struct BObject **memory,
         int *byte_index, uint8_t *bytecode)
 {
+    ignore_whitespace(&input);
     int char_count = compile_expr(input, mem_index, memory, byte_index, bytecode);
     if (char_count == 0) {
+        printf("Error: unexpected characters in expression\n");
         mem_clear(memory, *mem_index);
         return 0;
     }
@@ -524,7 +544,8 @@ int compile_expr_list(char *input, int *mem_index, struct BObject **memory, uint
             }
             *mem_index = *mem_index + 1;
             byte_index += 2;
-        } else if (isdigit(*input) || *input == '+' || *input == '-' || *input == '(') {
+        } else if (('a' <= *input && *input <= 'z') || ('A' <= *input && *input <= 'Z') ||
+                isdigit(*input) || *input == '+' || *input == '-' || *input == '(') {
             char_count = compile_expr(input, mem_index, memory, &byte_index, bytecode);
             if (char_count == 0) {
                 // compile_expr will clear memory on error
@@ -560,6 +581,39 @@ int compile_expr_list(char *input, int *mem_index, struct BObject **memory, uint
     return byte_index;
 }
 
+int compile_let(char *input, int *mem_index, struct BObject **memory,
+        int *byte_index, uint8_t *bytecode)
+{
+    if (!(('a' <= *input && *input <= 'z') || ('A' <= *input && *input <= 'Z'))) {
+        printf("Error: expected variable name\n");
+        return 0;
+    }
+    uint8_t var = *input >= 'a' ? *input - 'a' : *input - 'A';
+    input++;
+
+    ignore_whitespace(&input);
+    if (*input != '=') {
+        printf("Error: missing '=' in LET statement\n");
+        return 0;
+    }
+    input++;
+
+    ignore_whitespace(&input);
+    if (!compile_solo_expr(input, mem_index, memory, byte_index, bytecode)) {
+        return 0;
+    }
+    if (*byte_index + 1 >= MAX_LINE_PROGRAM) {
+        printf("Error: expression too long\n");
+        mem_clear(memory, *mem_index);
+        return 0;
+    }
+    bytecode[*byte_index] = OP_LET;
+    *byte_index = *byte_index + 1;
+    bytecode[*byte_index] = var;
+    *byte_index = *byte_index + 1;
+    return 1;
+}
+
 // Returns number of bytes in bytecode
 struct Statement *compile_command(char *input, struct BObject **temp_memory, uint8_t *bytecode)
 {
@@ -577,7 +631,7 @@ struct Statement *compile_command(char *input, struct BObject **temp_memory, uin
 
     // Get command
     enum TokenType type;
-    chars_parsed = parse_command(input, &type);
+    chars_parsed = parse_command_name(input, &type);
     if (!chars_parsed) {
         return NULL;
     }
@@ -599,6 +653,10 @@ struct Statement *compile_command(char *input, struct BObject **temp_memory, uin
         case INPUT:
             break;
         case LET:
+            compile_let(input, &mem_count, temp_memory, &byte_count, bytecode);
+            if (byte_count == 0) {
+                return NULL;
+            }
             break;
         case GOSUB:
             bytecode[byte_count++] = OP_SUBPUSH;
@@ -617,30 +675,30 @@ struct Statement *compile_command(char *input, struct BObject **temp_memory, uin
             }
             break;
         case RETURN:
-            byte_count = 1;
-            bytecode[0] = OP_RETURN;
+            bytecode[byte_count++] = OP_RETURN;
             break;
         case CLEAR:
-            byte_count = 1;
-            bytecode[0] = OP_CLEAR;
+            bytecode[byte_count++] = OP_CLEAR;
             break;
         case LIST:
-            byte_count = 1;
-            bytecode[0] = OP_LIST;
+            bytecode[byte_count++] = OP_LIST;
             break;
         case RUN:
-            byte_count = 1;
-            bytecode[0] = OP_RUN;
+            bytecode[byte_count++] = OP_RUN;
             break;
         case END:
-            byte_count = 1;
-            bytecode[0] = OP_END;
+            bytecode[byte_count++] = OP_END;
             break;
-        case DIM:
-            break;
+        // case DIM:
+        //     break;
         case REM:
-            byte_count = 1;
-            bytecode[0] = OP_NO;
+            bytecode[byte_count++] = OP_NO;
+            break;
+        case LOAD:
+            bytecode[byte_count++] = OP_LOAD;
+            break;
+        case SAVE:
+            bytecode[byte_count++] = OP_SAVE;
             break;
         case QUOTE:
             bytecode[byte_count++] = OP_PUSH;
@@ -653,7 +711,7 @@ struct Statement *compile_command(char *input, struct BObject **temp_memory, uin
             break;
         default:
             printf("Command not implemented\n");
-            break;
+            return NULL;
     }
     return statement_new(lineno, init_input, mem_count, temp_memory, byte_count, bytecode);
 }
@@ -665,6 +723,7 @@ struct Statement *compile_command(char *input, struct BObject **temp_memory, uin
 enum Status {
     STATUS_GOOD,
     STATUS_FINISHED,
+    STATUS_LOAD,
     STATUS_ERROR
 };
 
@@ -687,6 +746,22 @@ void program_list(struct Statement **program)
             printf("%s", stmt->line);
         }
     }
+}
+
+int program_save(struct Statement **program, char *filename)
+{
+    FILE *file = fopen(filename, "w+");
+    if (!file) {
+        return 0;
+    }
+    for (int i = 0; i < MAX_PROG_SIZE; i++) {
+        struct Statement *stmt = program[i];
+        if (stmt) {
+            fprintf(file, "%s", stmt->line);
+        }
+    }
+    fclose(file);
+    return 1;
 }
 
 struct Statement *statement_next(struct Statement **program, int lineno)
@@ -729,7 +804,8 @@ static void runtime_error(struct Statement *stmt, const char *fmt, ...)
 enum Status execute_statement(
         struct Statement *stmt,
         struct BObject **vars,
-        struct Statement **program)
+        struct Statement **program,
+        char **filename)
 {
     enum Status status = STATUS_GOOD;
 
@@ -757,6 +833,7 @@ enum Status execute_statement(
     printf("}\n");
     printf("op: %d\n", op);
 #endif
+
         switch (op) {
             case OP_NO:
                 break;
@@ -778,6 +855,15 @@ enum Status execute_statement(
             case OP_INPUT:
                 break;
             case OP_LET:
+                obj = pop();
+                mem_loc = stmt->bytecode[++ip];
+                if (obj->type == BOB_VAR) {
+                    if (mem_loc != obj->bvar) {
+                        memcpy(vars[mem_loc], vars[obj->bvar], sizeof(*vars[mem_loc]));
+                    }
+                } else {
+                    memcpy(vars[mem_loc], obj, sizeof(*vars[mem_loc]));
+                }
                 break;
             case OP_GOTO:
                 obj = pop();
@@ -829,6 +915,19 @@ enum Status execute_statement(
                 continue;
             case OP_END:
                 return STATUS_FINISHED;
+            case OP_LOAD:
+                obj = pop();
+                *filename = obj->bstr;
+                *filename = "test.bas";
+                return STATUS_LOAD;
+            case OP_SAVE:
+                obj = pop();
+                *filename = obj->bstr;
+                *filename = "teeeeest.bas";
+                if (!program_save(program, *filename)) {
+                    runtime_error(stmt, "%s", strerror(errno));
+                }
+                break;
             case OP_DIM:
                 break;
             case OP_HELP:
@@ -887,15 +986,23 @@ int main(void)
 
     struct Statement **program = calloc(MAX_PROG_SIZE, sizeof(*program));
 
+    FILE *file = stdin;
+    char *filename;
+
     while (1) {
         memset(input, 0, MAX_INPUT);
         memset(temp_memory, 0, sizeof(*temp_memory) * MAX_LINE_MEM);
         memset(temp_bytecode, 0, MAX_LINE_PROGRAM);
 
-        printf("> ");
-        if (!fgets(input, MAX_INPUT, stdin)) {
-            printf("\n");
-            break;
+        if (file == stdin) printf("> ");
+        if (!fgets(input, MAX_INPUT, file)) {
+            if (file == stdin) {
+                printf("\n");
+                break;
+            } else {
+                fclose(file);
+                file = stdin;
+            }
         }
 
         struct Statement *stmt = compile_command(input, temp_memory, temp_bytecode);
@@ -904,17 +1011,30 @@ int main(void)
             continue;
         } else if (stmt->lineno == 0) {
             // No line number means we execute the command immediately
-            enum Status status = execute_statement(stmt, vars, program);
-            statement_free(stmt);
+            enum Status status = execute_statement(stmt, vars, program, &filename);
             if (status == STATUS_FINISHED) {
+                statement_free(stmt);
                 break;
+            } else if (status == STATUS_LOAD) {
+                if (file != stdin) {
+                    fclose(file);
+                }
+                file = fopen(filename, "r");
+                if (!file) {
+                    runtime_error(stmt, "%s", strerror(errno));
+                    file = stdin;
+                }
             }
+            statement_free(stmt);
         } else {
             if (program[stmt->lineno]) {
                 statement_free(program[stmt->lineno]);
             }
             program[stmt->lineno] = stmt;
         }
+    }
+    if (file != stdin) {
+        fclose(file);
     }
 
     vars_free(vars);
