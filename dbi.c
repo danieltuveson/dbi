@@ -396,8 +396,8 @@ void mem_clear(struct BObject **memory, int index)
 }
 
 // Returns number of chars consumed
-int compile_string(char *input, int mem_index, struct BObject **memory,
-        int byte_index, uint8_t *bytecode)
+int compile_string(char *input, int *mem_index, struct BObject **memory,
+        int *byte_index, uint8_t *bytecode)
 {
     input++; // discard opening quote
     char *str_start = input;
@@ -409,26 +409,28 @@ int compile_string(char *input, int mem_index, struct BObject **memory,
         input++;
     }
 
-    // Add string to statement memory
-    memory[mem_index] = bstr_new(str_start, input - str_start);
-
     // Add location of string object to bytecode
-    bytecode[byte_index] = OP_PUSH;
-    byte_index++;
-    bytecode[byte_index] = mem_index;
+    bytecode[*byte_index] = OP_PUSH;
+    *byte_index = *byte_index + 1;
+    bytecode[*byte_index] = *mem_index;
+    *byte_index = *byte_index + 1;
+
+    // Add string to statement memory
+    memory[*mem_index] = bstr_new(str_start, input - str_start);
+    *mem_index = *mem_index + 1;
 
     return input - str_start + 2;
 }
 
-// TODO: Make this handle non-literal expressions
-// Need to add error code for when this can allocate multiple slots in memory / multiple
-// bytes in the bytecode array
 #define push_op(op)\
     stack[++op_stack_offset]
 
 #define pop_op()\
     stack[op_stack_offset--]
 
+// TODO: Make this handle non-literal expressions
+// Need to add error code for when this can allocate multiple slots in memory / multiple
+// bytes in the bytecode array
 int compile_expr(char *input, int *mem_index, struct BObject **memory, 
         int *byte_index, uint8_t *bytecode)
 {
@@ -517,6 +519,7 @@ int compile_solo_expr(char *input, int *mem_index, struct BObject **memory,
 
 // Returns number of bytecodes added
 // For now, only compile int / string literals
+// TODO: Make this more consistent with the other "compile_" functions
 int compile_expr_list(char *input, int *mem_index, struct BObject **memory, uint8_t *bytecode)
 {
     *mem_index = 0;
@@ -537,13 +540,11 @@ int compile_expr_list(char *input, int *mem_index, struct BObject **memory, uint
         }
 
         if (*input == '"') {
-            char_count = compile_string(input, *mem_index, memory, byte_index, bytecode);
+            char_count = compile_string(input, mem_index, memory, &byte_index, bytecode);
             if (char_count == 0) {
                 mem_clear(memory, *mem_index);
                 return 0;
             }
-            *mem_index = *mem_index + 1;
-            byte_index += 2;
         } else if (('a' <= *input && *input <= 'z') || ('A' <= *input && *input <= 'Z') ||
                 isdigit(*input) || *input == '+' || *input == '-' || *input == '(') {
             char_count = compile_expr(input, mem_index, memory, &byte_index, bytecode);
@@ -639,12 +640,12 @@ struct Statement *compile_command(char *input, struct BObject **temp_memory, uin
     ignore_whitespace(&input);
 
     // Parse based on command
-    int byte_count = 0;
-    int mem_count = 0;
+    int byte_index = 0;
+    int mem_index = 0;
     switch (type) {
         case PRINT:
-            byte_count = compile_expr_list(input, &mem_count, temp_memory, bytecode);
-            if (byte_count == 0) {
+            byte_index = compile_expr_list(input, &mem_index, temp_memory, bytecode);
+            if (byte_index == 0) {
                 return NULL;
             }
             break;
@@ -653,67 +654,82 @@ struct Statement *compile_command(char *input, struct BObject **temp_memory, uin
         case INPUT:
             break;
         case LET:
-            compile_let(input, &mem_count, temp_memory, &byte_count, bytecode);
-            if (byte_count == 0) {
+            compile_let(input, &mem_index, temp_memory, &byte_index, bytecode);
+            if (byte_index == 0) {
                 return NULL;
             }
             break;
         case GOSUB:
-            bytecode[byte_count++] = OP_SUBPUSH;
-            bytecode[byte_count++] = lineno + 1;
+            bytecode[byte_index++] = OP_SUBPUSH;
+            bytecode[byte_index++] = lineno + 1;
             /* fall through */
         case GOTO:
-            if (!compile_solo_expr(input, &mem_count, temp_memory, &byte_count, bytecode)) {
+            if (!compile_solo_expr(input, &mem_index, temp_memory, &byte_index, bytecode)) {
                 return NULL;
             }
-            if (byte_count >= MAX_LINE_PROGRAM) {
+            if (byte_index >= MAX_LINE_PROGRAM) {
                 printf("Error: expression too long\n");
-                mem_clear(temp_memory, mem_count);
+                mem_clear(temp_memory, mem_index);
                 return NULL;
             } else {
-                bytecode[byte_count++] = OP_GOTO;
+                bytecode[byte_index++] = OP_GOTO;
             }
             break;
         case RETURN:
-            bytecode[byte_count++] = OP_RETURN;
+            bytecode[byte_index++] = OP_RETURN;
             break;
         case CLEAR:
-            bytecode[byte_count++] = OP_CLEAR;
+            bytecode[byte_index++] = OP_CLEAR;
             break;
         case LIST:
-            bytecode[byte_count++] = OP_LIST;
+            bytecode[byte_index++] = OP_LIST;
             break;
         case RUN:
-            bytecode[byte_count++] = OP_RUN;
+            bytecode[byte_index++] = OP_RUN;
             break;
         case END:
-            bytecode[byte_count++] = OP_END;
+            bytecode[byte_index++] = OP_END;
             break;
         // case DIM:
         //     break;
         case REM:
-            bytecode[byte_count++] = OP_NO;
+            bytecode[byte_index++] = OP_NO;
             break;
         case LOAD:
-            bytecode[byte_count++] = OP_LOAD;
-            break;
         case SAVE:
-            bytecode[byte_count++] = OP_SAVE;
+            if (*input != '"') {
+                printf("Error: expected file name\n");
+                return NULL;
+            }
+            chars_parsed = compile_string(input, &mem_index, temp_memory, &byte_index, bytecode);
+            if (chars_parsed == 0) {
+                return NULL;
+            }
+            byte_index = 2;
+            input += chars_parsed;
+            bytecode[byte_index++] = type == LOAD ? OP_LOAD : OP_SAVE;
             break;
         case QUOTE:
-            bytecode[byte_count++] = OP_PUSH;
-            bytecode[byte_count++] = 0;
-            bytecode[byte_count++] = OP_PRINT;
-            temp_memory[mem_count++] = bstr_new(quote, strlen(quote));
+            bytecode[byte_index++] = OP_PUSH;
+            bytecode[byte_index++] = 0;
+            bytecode[byte_index++] = OP_PRINT;
+            temp_memory[mem_index++] = bstr_new(quote, strlen(quote));
             break;
         case HELP:
-            bytecode[byte_count++] = OP_HELP;
+            bytecode[byte_index++] = OP_HELP;
             break;
         default:
             printf("Command not implemented\n");
             return NULL;
     }
-    return statement_new(lineno, init_input, mem_count, temp_memory, byte_count, bytecode);
+    // TODO: clean up above functions so that the following doesn't throw errors
+    // ignore_whitespace(&input);
+    // if (*input != '\0') {
+    //     printf("Error: unexpected input '%c'\n", *input);
+    //     mem_clear(temp_memory, mem_index);
+    //     return NULL;
+    // }
+    return statement_new(lineno, init_input, mem_index, temp_memory, byte_index, bytecode);
 }
 
 // *******************************************************************
@@ -918,12 +934,10 @@ enum Status execute_statement(
             case OP_LOAD:
                 obj = pop();
                 *filename = obj->bstr;
-                *filename = "test.bas";
                 return STATUS_LOAD;
             case OP_SAVE:
                 obj = pop();
                 *filename = obj->bstr;
-                *filename = "teeeeest.bas";
                 if (!program_save(program, *filename)) {
                     runtime_error(stmt, "%s", strerror(errno));
                 }
