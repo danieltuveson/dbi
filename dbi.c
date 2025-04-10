@@ -673,39 +673,35 @@ int parse_relop(char *input, enum Opcode *op)
 //     // *byte_index = *byte_index + 1;
 //     return input - init_input;
 // }
-// 
-// int compile_let(char *input, int *mem_index, struct BObject **memory,
-//         int *byte_index, uint8_t *bytecode)
-// {
-//     if (!prefix_var(*input)) {
-//         printf("Error: expected variable name\n");
-//         return 0;
-//     }
-//     uint8_t var = *input >= 'a' ? *input - 'a' : *input - 'A';
-//     input++;
-// 
-//     ignore_whitespace(&input);
-//     if (*input != '=') {
-//         printf("Error: missing '=' in LET statement\n");
-//         return 0;
-//     }
-//     input++;
-// 
-//     ignore_whitespace(&input);
-//     if (!compile_solo_expr(input, mem_index, memory, byte_index, bytecode)) {
-//         return 0;
-//     }
-//     if (*byte_index + 1 >= MAX_BYTECODE) {
-//         printf("Error: expression too long\n");
-//         mem_clear(memory, *mem_index);
-//         return 0;
-//     }
-//     bytecode[*byte_index] = OP_LET;
-//     *byte_index = *byte_index + 1;
-//     bytecode[*byte_index] = var;
-//     *byte_index = *byte_index + 1;
-//     return 1;
-// }
+
+int compile_let(char *input, struct Memory *memory, struct Bytecode *bytecode)
+{
+    char *init_input = input;
+    if (!prefix_var(*input)) {
+        printf("Error: expected variable name\n");
+        return 0;
+    }
+    uint8_t var = *input >= 'a' ? *input - 'a' : *input - 'A';
+    input++;
+
+    ignore_whitespace(&input);
+    if (*input != '=') {
+        printf("Error: missing '=' in LET statement\n");
+        return 0;
+    }
+    input++;
+
+    ignore_whitespace(&input);
+    int chars_parsed = compile_expr(input, memory, bytecode);
+    if (!chars_parsed) {
+        return 0;
+    }
+    input += chars_parsed;
+
+    bytecode_add(bytecode, OP_LET);
+    bytecode_add(bytecode, var);
+    return input - init_input;
+}
 
 int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytecode,
         int lineno, enum Command *command_ptr)
@@ -740,12 +736,13 @@ int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytec
         //     break;
         // case INPUT:
         //     break;
-        // case LET:
-        //     compile_let(input, &mem_index, memory, &byte_index, bytecode);
-        //     if (byte_index == 0) {
-        //         return NULL;
-        //     }
-        //     break;
+        case LET:
+            chars_parsed = compile_let(input, memory, bytecode);
+            if (!chars_parsed) {
+                return 0;
+            }
+            input += chars_parsed;
+            break;
         case GOSUB:
             mem_loc = memory_add(memory, bint_new(lineno + 1));
             bytecode_add(bytecode, OP_PUSH);
@@ -779,6 +776,7 @@ int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytec
             //     break;
         case REM:
             bytecode_add(bytecode, OP_NO);
+            while (*input != '\0') input++;
             break;
         case LOAD:
         case SAVE:
@@ -847,7 +845,7 @@ struct Statement *compile_line(char *input, struct Memory *memory, struct Byteco
         ignore_whitespace(&input);
         if (*input == ':') {
             if (command == RUN) {
-                printf("Error: 'RUN' must be last command in statement\n");
+                printf("Error: RUN must be last command in statement\n");
                 return NULL;
             }
             input++;
@@ -1047,7 +1045,6 @@ enum Status execute_statement(
                     return STATUS_ERROR;
                 }
                 obj = pop();
-                printf("pushing subroutine: %d\n", obj->bint);
                 push_sub(obj->bint);
                 break;
             case OP_RETURN:
