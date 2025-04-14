@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define WORD_WIDTH 9
+#define WORD_WIDTH 12
 #define WORD_HEIGHT 7
 
 // Number of letters to print before newline, adjust as needed 

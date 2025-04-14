@@ -1,6 +1,3 @@
-// https://en.wikipedia.org/wiki/Tiny_BASIC
-// http://www.ittybittycomputers.com/ittybitty/tinybasic/TBuserMan.txt
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -12,24 +9,30 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <unistd.h>
-#include "pres.c"
 
 // Hardcoded so max of 4 digit numbers for GOTOs and such
 #define MAX_PROG_SIZE 10000
 
-// Hardcoded since variables can be A-Z
+// Hardcoded since variables can only be A-Z
 #define MAX_VARS 26
 
 // Arbitrary - adjust as needed
-#define MAX_INPUT 256
+#define MAX_LINE_LENGTH 256
 #define MAX_STACK 128
 #define MAX_CALL_STACK 128
-#define MAX_LINE_MEMORY 32 // NOTE: this should never be set to more than 256
+#define MAX_LINE_MEMORY 64 // NOTE: this should never be set to more than 256
                            //       since it will get used as a uint8_t
-#define MAX_BYTECODE 32
+#define MAX_BYTECODE 64
+
+// Enables big text
+#define BIG_TEXT 1
 
 // Toggling turns on some debug printing
-#define DEBUG 0
+#define DEBUG 1
+
+#if BIG_TEXT
+#include "bigtext.c"
+#endif
 
 // This is the only mutable global variable. It is just used for making error messages nice.
 static int global_lineno = 0;
@@ -100,7 +103,9 @@ struct CommandMapping command_map[] = {
     { "SAVE",   SAVE,   "save code to file",                                  "SAVE string" },
     { "BEEP",   BEEP,   "rings the bell",                                     "BEEP" },
     { "SLEEP",  SLEEP,  "sleeps for number of seconds",                       "SLEEP expr" },
-    { "BIG",    BIG,    "toggles text output size",                           "BIG" },
+#if BIG_TEXT
+    { "BIG",    BIG,    "toggles text embiggening",                           "BIG" },
+#endif
     { "SYSTEM", SYSTEM, "run terminal command",                               "SYSTEM string" },
     { "QUOTE",  QUOTE,  "an inspirational quote",                             "QUOTE" },
     { "HELP",   HELP,   "you just ran this",                                  "HELP" },
@@ -193,7 +198,6 @@ enum BobType {
     BOB_INT,
     BOB_STR,
     BOB_VAR
-        // , BOB_ARR
 };
 
 struct BObject {
@@ -246,6 +250,7 @@ void bobj_print(struct BObject *obj, struct BObject **vars, bool big_font)
     if (obj->type == BOB_VAR) {
         obj = vars[obj->bvar];
     }
+#if BIG_TEXT
     if (big_font) {
         size_t len;
         char *strbuff;
@@ -267,19 +272,23 @@ void bobj_print(struct BObject *obj, struct BObject **vars, bool big_font)
             printf("Internal error: unknown type in PRINT statement\n");
         }
     } else {
+#else
+        (void) big_font; // Ignore parameter
+#endif
         if (obj->type == BOB_INT) {
             printf("%d", obj->bint);
         } else if (obj->type == BOB_STR) {
             printf("%s", obj->bstr);
         } else {
             printf("Internal error: unknown type in PRINT statement\n");
+#if BIG_TEXT
         }
+#endif
     }
 }
 
 void bobj_println(struct BObject *obj, struct BObject **vars, bool big_font)
 {
-    // if (big_font) printf("\n");
     bobj_print(obj, vars, big_font);
     printf("\n");
 }
@@ -1033,9 +1042,11 @@ int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytec
             input += chars_parsed;
             bytecode_add(bytecode, OP_SLEEP);
             break;
+#if BIG_TEXT
         case BIG:
             bytecode_add(bytecode, OP_BIG);
             break;
+#endif
         case SYSTEM:
             if (*input != '"') {
                 compile_error("expected command\n");
@@ -1367,9 +1378,9 @@ enum Status execute_statement(
                 push_sub(obj->bint);
                 break;
             case OP_RETURN:
-                if (callstack_offset <= 0) {
-                    runtime_error(stmt, "no outer subroutine to return to");
-                    return STATUS_ERROR;
+                if (callstack_offset <  0) {
+                    // Return to REPL if we're not in a subroutine
+                    return STATUS_GOOD;
                 }
                 stmt = statement_next(program, pop_sub());
                 if (stmt) {
@@ -1514,14 +1525,28 @@ void vars_free(struct BObject **vars)
     }
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
-    print_intro();
+    FILE *file = stdin;
+    char *filename;
+
+    if (argc > 2) {
+        runtime_error(NULL, "too many arguments");
+    } else if (argc == 2) {
+        filename = argv[1];
+        file = fopen(filename, "r");
+        if (!file) {
+            runtime_error(NULL, "%s", strerror(errno));
+            return 1;
+        }
+    } else {
+        print_intro();
+    }
 
     struct BObject *vars[MAX_VARS] = {0};
     vars_init(vars);
 
-    char input[MAX_INPUT];
+    char input[MAX_LINE_LENGTH];
 
     uint8_t temp_bytecode_array[MAX_BYTECODE];
     struct Bytecode temp_bytecode = { 0, temp_bytecode_array };
@@ -1531,14 +1556,11 @@ int main(void)
 
     struct Statement **program = calloc(MAX_PROG_SIZE, sizeof(*program));
 
-    FILE *file = stdin;
-    char *filename;
-
     bool input_error = false;
     bool big_font = false;
 
     while (true) {
-        memset(input, 0, MAX_INPUT);
+        memset(input, 0, MAX_LINE_LENGTH);
 
         temp_bytecode.index = 0;
         memset(temp_bytecode_array, 0, MAX_BYTECODE);
@@ -1552,7 +1574,7 @@ int main(void)
             printf("> ");
         }
 
-        if (!fgets(input, MAX_INPUT, file)) {
+        if (!fgets(input, MAX_LINE_LENGTH, file)) {
             if (file == stdin) {
                 printf("\n");
                 break;
@@ -1564,9 +1586,9 @@ int main(void)
 
         // If user gives a line that exceeds length, ignore fgets input until we're parsed the
         // whole line
-        if (input[MAX_INPUT - 2] != '\0') {
+        if (input[MAX_LINE_LENGTH - 2] != '\0') {
             if (!input_error) {
-                printf("Error: input line too long \n");
+                runtime_error(NULL, "input line too long");
             }
             input_error = true;
             continue;
