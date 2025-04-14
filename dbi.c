@@ -28,7 +28,7 @@
 #define BIG_TEXT 1
 
 // Toggling turns on some debug printing
-#define DEBUG 1
+#define DEBUG 0
 
 #if BIG_TEXT
 #include "bigtext.c"
