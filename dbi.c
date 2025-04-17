@@ -8,13 +8,15 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <errno.h>
-#include <unistd.h>
 
-// Hardcoded so max of 4 digit numbers for GOTOs and such
+// Hardcoded so max of 4 digit numbers for GOTOs and such - adjust as needed
 #define MAX_PROG_SIZE 10000
 
 // Hardcoded since variables can only be A-Z
 #define MAX_VARS 26
+
+// Should be set to whatever longest command name is (+1 character for null byte)
+#define MAX_COMMAND_NAME 7 
 
 // Arbitrary - adjust as needed
 #define MAX_LINE_LENGTH 256
@@ -24,14 +26,19 @@
                            //       since it will get used as a uint8_t
 #define MAX_BYTECODE 64
 
-// Enables big text
-#define BIG_TEXT 1
-
 // Toggling turns on some debug printing
 #define DEBUG 0
 
+// Feature flags
+#define BIG_TEXT 0
+#define UNIX 0
+
 #if BIG_TEXT
 #include "bigtext.c"
+#endif
+
+#if UNIX
+#include <unistd.h>
 #endif
 
 // This is the only mutable global variable. It is just used for making error messages nice.
@@ -72,8 +79,12 @@ enum Command {
     LOAD,
     SAVE,
     BEEP,
+#if UNIX
     SLEEP,
+#endif
+#if BIG_TEXT
     BIG,
+#endif
     SYSTEM,
     HELP,
     QUOTE,
@@ -102,7 +113,9 @@ struct CommandMapping command_map[] = {
     { "LOAD",   LOAD,   "load code from file",                                "LOAD string" },
     { "SAVE",   SAVE,   "save code to file",                                  "SAVE string" },
     { "BEEP",   BEEP,   "rings the bell",                                     "BEEP" },
+#if UNIX
     { "SLEEP",  SLEEP,  "sleeps for number of seconds",                       "SLEEP expr" },
+#endif
 #if BIG_TEXT
     { "BIG",    BIG,    "toggles text embiggening",                           "BIG" },
 #endif
@@ -112,6 +125,16 @@ struct CommandMapping command_map[] = {
 };
 
 int command_map_size = sizeof(command_map) / sizeof(*command_map);
+
+char *command_to_str(enum Command command)
+{
+    for (int i = 0; i < command_map_size; i++) {
+        if (command_map[i].command == command) {
+            return command_map[i].str;
+        }
+    }
+    return NULL;
+}
 
 struct GrammarMapping {
     char *symbol;
@@ -124,16 +147,17 @@ struct GrammarMapping grammar_map[] = {
     { "cmd",           "one of the commands above" },
     { "expr-list",     "(string|expr) (, (string|expr) )*" },
     { "var-list",      "var (, var)*" },
-    { "expr",          "(+|-|ε) term ((+|-) term)*" },
+    { "expr",          "term ((+|-) term)*" },
     { "term",          "factor ((*|/) factor)*" },
     { "factor",        "var | number | (expr)" },
     { "var",           "A | B | C ... | Y | Z" },
-    { "number",        "digit digit*" },
+    { "number",        "(+|-|eps) digit digit*" },
     { "digit",         "0 | 1 | 2 | 3 | ... | 8 | 9" },
     { "relop",         "< (>|=|eps) | > (<|=|eps) | =" },
     { "string",        "\" string-char* \"" },
     { "string-char",   "non-quote, non-newline character" },
     { "comment",       "non-newline character" },
+    { "eps",           "nothing"},
 };
 
 int grammar_map_size = sizeof(grammar_map) / sizeof(*grammar_map);
@@ -169,7 +193,8 @@ void print_help(void)
     }
     print_line();
     printf("This BASIC interpreter is loosely based on Dennis Allison's Tiny BASIC\n");
-    printf("Most of the above grammar is taken from https://en.wikipedia.org/wiki/Tiny_BASIC\n");
+    printf("Most of the above grammar is taken from page 9 of Dr. Dobb's Journal:\n"
+            "https://archive.org/download/dr_dobbs_journal_vol_01/dr_dobbs_journal_vol_01.pdf\n");
     printf("Source code is available at https://github.com/danieltuveson/dbi\n");
     printf("Happy hacking!\n");
     print_line();
@@ -243,54 +268,6 @@ static void bobj_free(struct BObject *obj)
         free(obj->bstr);
     }
     free(obj);
-}
-
-void bobj_print(struct BObject *obj, struct BObject **vars, bool big_font)
-{
-    if (obj->type == BOB_VAR) {
-        obj = vars[obj->bvar];
-    }
-#if BIG_TEXT
-    if (big_font) {
-        size_t len;
-        char *strbuff;
-        if (obj->type == BOB_INT) {
-            len = 3 * sizeof(int) + 2;
-            strbuff = calloc(len, 1);
-            snprintf(strbuff, len, "%d", obj->bint);
-            print_big(strbuff);
-            free(strbuff);
-
-        } else if (obj->type == BOB_STR) {
-            len = strlen(obj->bstr) + 1;
-            strbuff = calloc(len, 1);
-            snprintf(strbuff, len, "%s", obj->bstr);
-            print_big(strbuff);
-            free(strbuff);
-
-        } else {
-            printf("Internal error: unknown type in PRINT statement\n");
-        }
-    } else {
-#else
-        (void) big_font; // Ignore parameter
-#endif
-        if (obj->type == BOB_INT) {
-            printf("%d", obj->bint);
-        } else if (obj->type == BOB_STR) {
-            printf("%s", obj->bstr);
-        } else {
-            printf("Internal error: unknown type in PRINT statement\n");
-#if BIG_TEXT
-        }
-#endif
-    }
-}
-
-void bobj_println(struct BObject *obj, struct BObject **vars, bool big_font)
-{
-    bobj_print(obj, vars, big_font);
-    printf("\n");
 }
 
 // *******************************************************************
@@ -451,8 +428,12 @@ enum Opcode {
     OP_LOAD,
     OP_SAVE,
     OP_HELP,
+#if UNIX
     OP_SLEEP,
+#endif
+#if BIG_TEXT
     OP_BIG,
+#endif
     OP_SYSTEM,
 
     // Comparison operators
@@ -483,10 +464,20 @@ bool prefix_var(char c)
     return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z');
 }
 
+uint8_t get_var(char c)
+{
+    return c >= 'a' ? c - 'a' : c - 'A';
+}
+
+bool prefix_number(char c)
+{
+    return c == '+' || c == '-' || isdigit(c);
+}
+
 // Checks if input might be numeric expression
 bool prefix_expr(char c)
 {
-    return prefix_var(c) || c == '+' || c == '-' || c == '(' || isdigit(c);
+    return prefix_number(c) || prefix_var(c) || c == '(';
 }
 
 bool prefix_stmt_end(char c)
@@ -530,9 +521,9 @@ int parse_lineno(char *input, int *lineno)
 // Returns number of chars consumed
 int parse_command_name(char *input, enum Command *command_ptr)
 {
-    char command[7] = {0};
+    char command[MAX_COMMAND_NAME] = {0};
     int i = 0;
-    while (i < 7 && prefix_var(input[i])) {
+    while (i < MAX_COMMAND_NAME && prefix_var(input[i])) {
         command[i] = toupper(input[i]);
         i++;
     }
@@ -576,9 +567,18 @@ int compile_string(char *input, struct Memory *memory, struct Bytecode *bytecode
 int compile_int(char *input, struct Memory *memory, struct Bytecode *bytecode)
 {
     char *init_input = input;
+
+    int sign = 1;
+    if (*input == '-') {
+        sign = -1;
+        input++;
+    } else if (*input == '+') {
+        input++;
+    }
+
     int num = 0;
     while (isdigit(*input)) {
-        num = 10 * num + *input - '0';
+        num = 10 * num + sign * (*input - '0');
         input++;
     }
 
@@ -595,7 +595,7 @@ int compile_int(char *input, struct Memory *memory, struct Bytecode *bytecode)
 
 int compile_var(char *input, struct Memory *memory, struct Bytecode *bytecode)
 {
-    uint8_t var = *input >= 'a' ? *input - 'a' : *input - 'A';
+    uint8_t var = get_var(*input);
     input++;
 
     int mem_loc = memory_add_var(memory, var);
@@ -609,10 +609,21 @@ int compile_var(char *input, struct Memory *memory, struct Bytecode *bytecode)
     return 1;
 }
 
-void push_op(char *stack, int *op_stack_offset, char op)
+bool push_op(char *stack, int *op_stack_offset, char op)
 {
+    if (*op_stack_offset + 1 >= MAX_STACK) {
+        compile_error("large expression exhausted operator stack");
+        return false;
+    }
+#if DEBUG
+    printf("calling push op with '%c',", op);
+#endif
     *op_stack_offset = *op_stack_offset + 1;
+#if DEBUG
+    printf("stack offset of '%d'\n", *op_stack_offset);
+#endif
     stack[*op_stack_offset] = op;
+    return true;
 }
 
 char pop_op(char *stack, int *op_stack_offset)
@@ -622,29 +633,51 @@ char pop_op(char *stack, int *op_stack_offset)
     return op;
 }
 
+
+void compile_op(struct Bytecode *bytecode, char op)
+{
+    if (op == '*') {
+        bytecode_add(bytecode, OP_MUL);
+    } else if (op == '/') {
+        bytecode_add(bytecode, OP_DIV);
+    } else  if (op == '+') {
+        bytecode_add(bytecode, OP_ADD);
+    } else if (op == '-') {
+        bytecode_add(bytecode, OP_SUB);
+    } else {
+#if DEBUG
+        printf("op: %c\n", op);
+#endif
+        assert(0);
+    }
+}
+
 #define push(op) push_op(stack, &op_stack_offset, op)
 #define pop(op) pop_op(stack, &op_stack_offset)
 
 #define peek()\
     op_stack_offset > 0 ? stack[op_stack_offset] : 0
 
-// TODO: Make this handle non-literal expressions
-// Need to add error code for when this can allocate multiple slots in memory / multiple
-// bytes in the bytecode array
+#if DEBUG
+void print_stack(char stack[MAX_STACK], int stack_offset)
+{
+    printf("stack {");
+    for (int i = 0; i < stack_offset; i++) {
+        printf("'%c'", stack[i]);
+        if (i + 1 != stack_offset) {
+            printf(", ");
+        }
+    }
+    printf("}\n");
+}
+#endif
+
 int compile_expr(char *input, struct Memory *memory, struct Bytecode *bytecode)
 {
     char *init_input = input;
     int chars_parsed = 0;
 
-    // int sign = 1;
-    // if (*input == '-') {
-    //     sign = -1;
-    //     input++;
-    // } else if (*input == '+') {
-    //     input++;
-    // }
-
-    // Shunting yard
+    // shunting yard
     char stack[MAX_STACK];
     int op_stack_offset = 0;
     int mode_op = 0;
@@ -653,84 +686,100 @@ int compile_expr(char *input, struct Memory *memory, struct Bytecode *bytecode)
         ignore_whitespace(&input);
 
         if (mode_op) {
-            if (op_stack_offset + 1 >= MAX_STACK) {
-                compile_error("expression exhausted operator stack");
-                return 0;
-            } else if (prefix_op(*input)) {
-                op = peek();
-#if DEBUG
-                printf("op: %c\n", *input);
-#endif
-                if (op == '*' || op == '/') {
-                    while (op != '+' && op != '-' && op != '(' && op != 0) {
-                        pop();
-                        op = peek();
-                        if (op == '*') {
-                            bytecode_add(bytecode, OP_MUL);
-                        } else if (op == '/') {
-                            bytecode_add(bytecode, OP_DIV);
-                        }
+            if (*input == ')') {
+                while (*input == ')') {
+                    op = peek();
+                    if (op == 0) {
+                        compile_error("closing parenthesis does not match any opening parenthesis");
+                        return 0;
                     }
-                } else if (op == '+' || op == '-') {
                     while (op != '(' && op != 0) {
+                        compile_op(bytecode, op);
                         pop();
                         op = peek();
-                        if (op == '*') {
-                            bytecode_add(bytecode, OP_MUL);
-                        } else if (op == '/') {
-                            bytecode_add(bytecode, OP_DIV);
-                        } else  if (op == '+') {
-                            bytecode_add(bytecode, OP_ADD);
-                        } else if (op == '-') {
-                            bytecode_add(bytecode, OP_SUB);
-                        }
+                    }
+                    if (op != '(') {
+                        compile_error("opening parenthesis does not match any closing parenthesis");
+                        return 0;
+                    }
+                    pop();
+#if DEBUG
+                    printf("peek after paren pop: %c\n", peek());
+#endif
+                    input++;
+                    ignore_whitespace(&input);
+                }
+            }
+            if (prefix_op(*input)) {
+#if DEBUG
+                printf("stack offset: %d\n", op_stack_offset);
+                printf("current op: %c\n", *input);
+                printf("peek: %c\n", peek());
+#endif
+                op = peek();
+                if (*input == '*' || *input == '/') {
+                    while (op != '+' && op != '-' && op != '(' && op != 0) {
+                        compile_op(bytecode, op);
+                        pop();
+                        op = peek();
+                    }
+                } else if (*input == '+' || *input == '-') {
+                    while (op != '(' && op != 0) {
+                        compile_op(bytecode, op);
+                        pop();
+                        op = peek();
                     }
                 }
-                push(*input);
-
-            } else if (*input == '(') {
-                push('(');
-
-            } else if (*input == ')') {
+                if (!push(*input)) {
+                    return 0;
+                }
+                input++;
             } else {
+#if DEBUG
+                printf("breaking at '%c'\n", *input);
+#endif
                 break;
             }
-
-            input++;
         } else {
-            if (isdigit(*input)) {
+            while (*input == '(') {
+                if (!push(*input)) {
+                    return 0;
+                }
+                input++;
+                ignore_whitespace(&input);
+            }
+            if (prefix_number(*input)) {
                 chars_parsed = compile_int(input, memory, bytecode);
+                if (!chars_parsed) {
+                    return 0;
+                }
+                input += chars_parsed;
             } else if (prefix_var(*input)) {
                 chars_parsed = compile_var(input, memory, bytecode);
+                if (!chars_parsed) {
+                    return 0;
+                }
+                input += chars_parsed;
             } else {
                 compile_error("expected number");
                 return 0;
             }
-            if (!chars_parsed) {
-                return 0;
-            }
-            input += chars_parsed;
         }
-
         mode_op = !mode_op;
-        // For now, just parse one thing
-        // break;
+#if DEBUG
+        print_stack(stack, op_stack_offset);
+#endif
     }
 
-    while (peek() != 0) {
-        op = pop();
+    op = peek();
+    while (op != 0) {
         if (op == '(') {
             compile_error("unbalanced parentheses");
             return 0;
-        } else if (op == '*') {
-            bytecode_add(bytecode, OP_MUL);
-        } else if (op == '/') {
-            bytecode_add(bytecode, OP_DIV);
-        } else  if (op == '+') {
-            bytecode_add(bytecode, OP_ADD);
-        } else if (op == '-') {
-            bytecode_add(bytecode, OP_SUB);
         }
+        compile_op(bytecode, op);
+        pop();
+        op = peek();
     }
 
     if (input == init_input) {
@@ -746,7 +795,7 @@ int compile_expr(char *input, struct Memory *memory, struct Bytecode *bytecode)
 #undef peek
 
 // Returns number of chars parsed
-int compile_expr_list(char *input, struct Memory *memory, struct Bytecode *bytecode)
+int compile_print(char *input, struct Memory *memory, struct Bytecode *bytecode)
 {
     char *init_input = input;
     do {
@@ -761,7 +810,7 @@ int compile_expr_list(char *input, struct Memory *memory, struct Bytecode *bytec
             compile_error("unexpected end of statement");
             return 0;
         } else {
-            compile_error("invalid input: %s", input);
+            compile_error("invalid input: %c", *input);
             return 0;
         }
 
@@ -867,7 +916,7 @@ int compile_if(char *input, struct Memory *memory, struct Bytecode *bytecode,
     // Parse "THEN" token
     char chars[5] = {0};
     for (int i = 0; i < 4; i++) {
-        if (*input == '\0') {
+        if (prefix_stmt_end(*input)) {
             compile_error("unexpected end of input");
             return 0;
         }
@@ -897,6 +946,55 @@ int compile_if(char *input, struct Memory *memory, struct Bytecode *bytecode,
     return input - init_input;
 }
 
+int compile_input(char *input, struct Bytecode *bytecode)
+{
+    char *init_input = input;
+    bool comma = false;
+    uint32_t flags = 0;
+    uint8_t count = 0; // Can just put this in bytecode, since it's always less than MAX_VARS
+
+    bytecode_add(bytecode, OP_INPUT);
+
+    // Counter for number of input variables set after loop
+    uint8_t count_index = bytecode->index;
+    bytecode_add(bytecode, 0);
+
+    while (*input != 0) {
+        if (comma) {
+            if (*input != ',') {
+                compile_error("expected comma");
+                return 0;
+            }
+        } else {
+            if (!prefix_var(*input)) {
+                compile_error("expected variable name");
+                return 0;
+            }
+
+            uint8_t var = get_var(*input);
+            if (flags & (UINT32_C(1) << var)) {
+                compile_error("'%c' used twice in INPUT statement", *input);
+                return 0;
+            } else {
+                flags = flags | (UINT32_C(1) << var);
+            }
+
+            bytecode_add(bytecode, var);
+            count++;
+        }
+        input++;
+        ignore_whitespace(&input);
+        comma = !comma;
+    }
+    bytecode->array[count_index] = count;
+
+    if (input == init_input) {
+        compile_error("expected variable name");
+        return 0;
+    }
+    return input - init_input;
+}
+
 int compile_let(char *input, struct Memory *memory, struct Bytecode *bytecode)
 {
     char *init_input = input;
@@ -904,7 +1002,7 @@ int compile_let(char *input, struct Memory *memory, struct Bytecode *bytecode)
         compile_error("expected variable name");
         return 0;
     }
-    uint8_t var = *input >= 'a' ? *input - 'a' : *input - 'A';
+    uint8_t var = get_var(*input);
     input++;
 
     ignore_whitespace(&input);
@@ -945,7 +1043,7 @@ int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytec
     int mem_loc;
     switch (command) {
         case PRINT:
-            chars_parsed = compile_expr_list(input, memory, bytecode);
+            chars_parsed = compile_print(input, memory, bytecode);
             if (!chars_parsed) {
                 return 0;
             }
@@ -958,8 +1056,13 @@ int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytec
             }
             input += chars_parsed;
             break;
-            // case INPUT:
-            //     break;
+        case INPUT:
+            chars_parsed = compile_input(input, bytecode);
+            if (chars_parsed == 0) {
+                return 0;
+            }
+            input += chars_parsed;
+            break;
         case LET:
             chars_parsed = compile_let(input, memory, bytecode);
             if (!chars_parsed) {
@@ -1034,6 +1137,7 @@ int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytec
             bytecode_add(bytecode, mem_loc);
             bytecode_add(bytecode, OP_PRINTLN);
             break;
+#if UNIX
         case SLEEP:
             chars_parsed = compile_expr(input, memory, bytecode);
             if (!chars_parsed) {
@@ -1042,6 +1146,7 @@ int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytec
             input += chars_parsed;
             bytecode_add(bytecode, OP_SLEEP);
             break;
+#endif
 #if BIG_TEXT
         case BIG:
             bytecode_add(bytecode, OP_BIG);
@@ -1063,10 +1168,31 @@ int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytec
             bytecode_add(bytecode, OP_HELP);
             break;
         default:
-            printf("Command not implemented\n");
+            compile_error("command not implemented");
             return 0;
     }
     return input - init_input;
+}
+
+// Technically someone could come *exactly* up against these limits without going over
+// but to make error checking simpler, I don't care
+bool end_of_user_input_checks(char *input, struct Bytecode *bytecode, struct Memory *memory)
+{
+    if (bytecode->index == MAX_BYTECODE) {
+        compile_error("generated code too large");
+        return false;
+    }
+    if (memory->index == MAX_LINE_MEMORY) {
+        compile_error("generated code exceeds memory usage limit");
+        return false;
+    }
+
+    ignore_whitespace(&input);
+    if (*input != '\0') {
+        compile_error("unexpected input %c", *input);
+        return false;
+    }
+    return true;
 }
 
 // Returns number of bytes in bytecode
@@ -1074,9 +1200,9 @@ struct Statement *compile_line(char *input, struct Memory *memory, struct Byteco
 {
     ignore_whitespace(&input);
 
-    // Ignore empty lines
-    if (*input == '\0') {
-        return 0;
+    // Ignore empty lines and # comments
+    if (*input == '\0' || *input == '#') {
+        return NULL;
     }
 
     char *init_input = input;
@@ -1103,12 +1229,8 @@ struct Statement *compile_line(char *input, struct Memory *memory, struct Byteco
 
         ignore_whitespace(&input);
         if (*input == ':') {
-            if (command == RUN) {
-                compile_error("RUN must be last command in statement");
-                memory_clear(memory);
-                return NULL;
-            } else if (command == LOAD) {
-                compile_error("LOAD must be last command in statement");
+            if (command == RUN || command == INPUT || command == LOAD) {
+                compile_error("%s must be last command in statement", command_to_str(command));
                 memory_clear(memory);
                 return NULL;
             }
@@ -1118,22 +1240,7 @@ struct Statement *compile_line(char *input, struct Memory *memory, struct Byteco
         }
     } while (true);
 
-    // Technically someone could come *exactly* up against these limits without going over
-    // but to make error checking simpler, I don't care
-    if (bytecode->index == MAX_BYTECODE) {
-        compile_error("generated code too large");
-        memory_clear(memory);
-        return 0;
-    }
-    if (memory->index == MAX_LINE_MEMORY) {
-        compile_error("generated code exceeds memory usage limit");
-        memory_clear(memory);
-        return 0;
-    }
-
-    ignore_whitespace(&input);
-    if (*input != '\0') {
-        compile_error("unexpected input %c", *input);
+    if (!end_of_user_input_checks(input, bytecode, memory)) {
         memory_clear(memory);
         return NULL;
     }
@@ -1213,6 +1320,128 @@ static void runtime_error(struct Statement *stmt, const char *fmt, ...)
     printf("\n");
 }
 
+void bobj_print(struct BObject *obj, struct BObject **vars, bool big_font)
+{
+    if (obj->type == BOB_VAR) {
+        obj = vars[obj->bvar];
+    }
+#if BIG_TEXT
+    if (big_font) {
+        size_t len;
+        char *strbuff;
+        if (obj->type == BOB_INT) {
+            len = 3 * sizeof(int) + 2;
+            strbuff = calloc(len, 1);
+            snprintf(strbuff, len, "%d", obj->bint);
+            print_big(strbuff);
+            free(strbuff);
+
+        } else if (obj->type == BOB_STR) {
+            len = strlen(obj->bstr) + 1;
+            strbuff = calloc(len, 1);
+            snprintf(strbuff, len, "%s", obj->bstr);
+            print_big(strbuff);
+            free(strbuff);
+
+        } else {
+            runtime_error(NULL, "Internal runtime error: unknown type in PRINT statement");
+        }
+    } else {
+#else
+        (void) big_font; // Ignore parameter
+#endif
+        if (obj->type == BOB_INT) {
+            printf("%d", obj->bint);
+        } else if (obj->type == BOB_STR) {
+            printf("%s", obj->bstr);
+        } else {
+            runtime_error(NULL, "Internal runtime error: unknown type in PRINT statement");
+#if BIG_TEXT
+        }
+#endif
+    }
+}
+
+void bobj_println(struct BObject *obj, struct BObject **vars, bool big_font)
+{
+    bobj_print(obj, vars, big_font);
+    printf("\n");
+}
+
+// Compile input into a bunch of OP_LETs - kinda hacky but I can't think of a better way
+struct Statement *execute_input(struct Statement *stmt, int var_count, uint8_t *var_list)
+{
+    global_lineno = stmt->lineno;
+    char input_arr[MAX_LINE_LENGTH] = {0};
+    char *input = input_arr; // Decay to pointer, please
+    char *init_input = input;
+
+    if (!fgets(input, MAX_LINE_LENGTH, stdin)) {
+        compile_error("unexpected end of input");
+        return NULL;
+    }
+
+    uint8_t temp_bytecode_array[MAX_BYTECODE] = {0};
+    struct Bytecode temp_bytecode = { 0, temp_bytecode_array };
+
+    struct BObject *temp_memory_array[MAX_LINE_MEMORY] = {0};
+    struct Memory temp_memory = { 0, temp_memory_array };
+
+    int current_var_count = 0;
+    do {
+        int char_count = 0;
+        ignore_whitespace(&input);
+
+        // Compile expression
+        if (prefix_expr(*input)) {
+            char_count = compile_expr(input, &temp_memory, &temp_bytecode);
+            if (!char_count) {
+                memory_clear(&temp_memory);
+                return NULL;
+            }
+        } else if (*input == '\0') {
+            compile_error("unexpected end of input");
+            memory_clear(&temp_memory);
+            return NULL;
+        } else {
+            compile_error("invalid input: %c", *input);
+            memory_clear(&temp_memory);
+            return NULL;
+        }
+        input += char_count;
+
+        // Compile inserted LET
+        if (current_var_count >= var_count) {
+            compile_error("too many inputs values (expected %d)", var_count);
+            memory_clear(&temp_memory);
+            return NULL;
+        }
+        bytecode_add(&temp_bytecode, OP_LET);
+        bytecode_add(&temp_bytecode, var_list[current_var_count]);
+
+        ignore_whitespace(&input);
+        if (*input == ',') {
+            input++;
+        } else if (*input == '\0') {
+            break;
+        }
+        current_var_count++;
+    } while (true);
+
+    if (current_var_count < var_count - 1) {
+        compile_error("expected %d input value(s), but got %d", var_count, current_var_count + 1);
+        memory_clear(&temp_memory);
+        return NULL;
+    }
+
+    if (!end_of_user_input_checks(input, &temp_bytecode, &temp_memory)) {
+        memory_clear(&temp_memory);
+        return NULL;
+    }
+
+    return statement_new(global_lineno, init_input, &temp_memory, &temp_bytecode);
+}
+
 #define push(val)\
     memcpy(&(stack[++stack_offset]), val, sizeof(*val))
 
@@ -1253,12 +1482,15 @@ static void runtime_error(struct Statement *stmt, const char *fmt, ...)
     lnum = obj->bint;\
 } while(0)
 
-enum Status execute_statement(
+enum Status execute_line(
         struct Statement *stmt,
         struct BObject **vars,
         struct Statement **program,
-        char **filename,
-        bool *big_font)
+        bool run_file,
+        // Out parameters
+        struct Statement **input_stmt_ptr,
+        char **filename_ptr,
+        bool *big_font_ptr)
 {
     enum Status status = STATUS_GOOD;
 
@@ -1269,10 +1501,15 @@ enum Status execute_statement(
     int callstack[MAX_CALL_STACK];
 
     struct BObject *obj;
-    int mem_loc;
     int ip = 0;
+
+    // Forward declarations since clang doesn't like these in switch
+    int mem_loc, count;
     int lnum, rnum;
     int cmp;
+
+    while (true) {
+        uint8_t op = stmt->bytecode->array[ip];
 
 #if DEBUG
     printf("stmt->array->index:%d\n", stmt->bytecode->index);
@@ -1301,9 +1538,6 @@ enum Status execute_statement(
 
 #endif
 
-    while (true) {
-        uint8_t op = stmt->bytecode->array[ip];
-
 #if DEBUG
         printf("op: %d\n", op);
 #endif
@@ -1321,16 +1555,31 @@ enum Status execute_statement(
                 break;
             case OP_PRINT:
                 obj = pop();
-                bobj_print(obj, vars, *big_font);
+                bobj_print(obj, vars, *big_font_ptr);
                 break;
             case OP_PRINTLN:
                 obj = pop();
-                bobj_println(obj, vars, *big_font);
+                bobj_println(obj, vars, *big_font_ptr);
                 break;
-                // case OP_IF:
-                //     break;
             case OP_INPUT:
-                break;
+                count = stmt->bytecode->array[++ip];
+
+                // Clear out old input, if it exists
+                if (*input_stmt_ptr != NULL) {
+                    statement_free(*input_stmt_ptr);
+                    *input_stmt_ptr = NULL;
+                }
+                
+                // Get new input
+                *input_stmt_ptr = execute_input(stmt, count, stmt->bytecode->array + ip + 1);
+                if (*input_stmt_ptr == NULL) {
+                    return STATUS_ERROR;
+                }
+
+                // Execute compiled input
+                stmt = *input_stmt_ptr;
+                ip = 0;
+                continue;
             case OP_LET:
                 obj = pop();
                 mem_loc = stmt->bytecode->array[++ip];
@@ -1378,8 +1627,8 @@ enum Status execute_statement(
                 push_sub(obj->bint);
                 break;
             case OP_RETURN:
-                if (callstack_offset <  0) {
-                    // Return to REPL if we're not in a subroutine
+                if (callstack_offset <=  0) {
+                    // If we're not in a subroutine, this sends us back to the REPL
                     return STATUS_GOOD;
                 }
                 stmt = statement_next(program, pop_sub());
@@ -1389,7 +1638,13 @@ enum Status execute_statement(
                 } 
                 return STATUS_GOOD;
             case OP_CLEAR:
-                program_clear(program);
+                if (stmt->lineno != 0) {
+                    // If statement is self-destructing, just return to REPL
+                    program_clear(program);
+                    return STATUS_GOOD;
+                } else {
+                    program_clear(program);
+                }
                 break;
             case OP_LIST:
                 program_list(program);
@@ -1402,18 +1657,22 @@ enum Status execute_statement(
                 ip = 0;
                 continue;
             case OP_END:
-                return STATUS_FINISHED;
+                if (run_file || stmt->lineno == 0) {
+                    return STATUS_FINISHED;
+                }
+                return STATUS_GOOD;
             case OP_LOAD:
                 obj = pop();
-                *filename = obj->bstr;
+                *filename_ptr = obj->bstr;
                 return STATUS_LOAD;
             case OP_SAVE:
                 obj = pop();
-                *filename = obj->bstr;
-                if (!program_save(program, *filename)) {
+                if (!program_save(program, obj->bstr)) {
                     runtime_error(stmt, "%s", strerror(errno));
+                    return STATUS_ERROR;
                 }
                 break;
+#if UNIX
             case OP_SLEEP:
                 obj = pop();
                 if (obj->type == BOB_VAR) {
@@ -1425,9 +1684,12 @@ enum Status execute_statement(
                 }
                 sleep(obj->bint);
                 break;
+#endif
+#if BIG_TEXT
             case OP_BIG:
-                *big_font = !*big_font;
+                *big_font_ptr = !*big_font_ptr;
                 break;
+#endif
             case OP_SYSTEM:
                 obj = pop();
                 if (obj->type == BOB_VAR) {
@@ -1440,6 +1702,7 @@ enum Status execute_statement(
                 int err = system(obj->bstr);
                 if (err == -1) {
                     runtime_error(stmt, "%s", strerror(errno));
+                    return STATUS_ERROR;
                 }
                 break;
             case OP_HELP:
@@ -1461,6 +1724,7 @@ enum Status execute_statement(
                 math_boilerplate();
                 if (rnum == 0) {
                     runtime_error(stmt, "division by zero");
+                    return STATUS_ERROR;
                 }
                 push_int(lnum / rnum);
                 break;
@@ -1474,7 +1738,6 @@ enum Status execute_statement(
                 break;
             case OP_EQ:
                 math_boilerplate();
-                // printf("lnum:%d; rnum:%d\n", lnum, rnum);
                 push_int(lnum == rnum);
                 break;
             case OP_NEQ:
@@ -1490,7 +1753,7 @@ enum Status execute_statement(
                 push_int(lnum >= rnum);
                 break;
             default:
-                printf("Internal error: unknown command encountered\n");
+                runtime_error(stmt, "Internal error: unknown command encountered\n");
                 return STATUS_ERROR;
         }
         ip++;
@@ -1527,14 +1790,19 @@ void vars_free(struct BObject **vars)
 
 int main(int argc, char *argv[])
 {
-    FILE *file = stdin;
     char *filename;
+    FILE *file = stdin;
+
+    // If run from command line, `run_file = true` will add 'run' statement after file is loaded
+    bool run_file = false;
 
     if (argc > 2) {
         runtime_error(NULL, "too many arguments");
+        return 1;
     } else if (argc == 2) {
         filename = argv[1];
         file = fopen(filename, "r");
+        run_file = true;
         if (!file) {
             runtime_error(NULL, "%s", strerror(errno));
             return 1;
@@ -1559,6 +1827,9 @@ int main(int argc, char *argv[])
     bool input_error = false;
     bool big_font = false;
 
+    // Fake statement storing data from INPUT command
+    struct Statement *input_stmt = NULL;
+
     while (true) {
         memset(input, 0, MAX_LINE_LENGTH);
 
@@ -1581,6 +1852,9 @@ int main(int argc, char *argv[])
             } else {
                 fclose(file);
                 file = stdin;
+                if (run_file) {
+                    strcpy(input, "run\n");
+                }
             }
         }
 
@@ -1603,7 +1877,16 @@ int main(int argc, char *argv[])
             continue;
         } else if (stmt->lineno == 0) {
             // No line number means we execute the command immediately
-            enum Status status = execute_statement(stmt, vars, program, &filename, &big_font);
+            enum Status status = execute_line(stmt, vars, program, run_file,
+                    &input_stmt, &filename, &big_font);
+
+            // Clear output parameters
+            run_file = false;
+            if (input_stmt != NULL) {
+                statement_free(input_stmt);
+                input_stmt = NULL;
+            }
+
             if (status == STATUS_FINISHED) {
                 statement_free(stmt);
                 break;
