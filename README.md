@@ -1,7 +1,7 @@
 # dan's basic interpreter
 A basic tiny interpreter for interpreting Tiny BASIC programs in the style of [Tiny BASIC](https://en.wikipedia.org/wiki/Tiny_BASIC).
 
-## install
+## Install
 Requires make and a C compiler
 
 ```sh
