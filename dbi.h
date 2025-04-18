@@ -22,8 +22,8 @@
 #define DEBUG 0
 
 /* Feature flags */
-#define FF_BIG 0
-#define FF_SLEEP 0
+#define FF_BIG 1
+#define FF_SLEEP 1
 
 int dbi_run_file(char *input_file_name);
 
