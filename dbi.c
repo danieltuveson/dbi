@@ -8,36 +8,13 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <errno.h>
+#include "dbi.h"
 
-// Hardcoded so max of 4 digit numbers for GOTOs and such - adjust as needed
-#define MAX_PROG_SIZE 10000
-
-// Hardcoded since variables can only be A-Z
-#define MAX_VARS 26
-
-// Should be set to whatever longest command name is (+1 character for null byte)
-#define MAX_COMMAND_NAME 7 
-
-// Arbitrary - adjust as needed
-#define MAX_LINE_LENGTH 256
-#define MAX_STACK 128
-#define MAX_CALL_STACK 128
-#define MAX_LINE_MEMORY 64 // NOTE: this should never be set to more than 256
-                           //       since it will get used as a uint8_t
-#define MAX_BYTECODE 64
-
-// Toggling turns on some debug printing
-#define DEBUG 0
-
-// Feature flags
-#define BIG_TEXT 0
-#define UNIX 0
-
-#if BIG_TEXT
+#if FF_BIG
 #include "bigtext.c"
 #endif
 
-#if UNIX
+#if FF_SLEEP
 #include <unistd.h>
 #endif
 
@@ -79,10 +56,10 @@ enum Command {
     LOAD,
     SAVE,
     BEEP,
-#if UNIX
+#if FF_SLEEP
     SLEEP,
 #endif
-#if BIG_TEXT
+#if FF_BIG
     BIG,
 #endif
     SYSTEM,
@@ -113,10 +90,10 @@ struct CommandMapping command_map[] = {
     { "LOAD",   LOAD,   "load code from file",                                "LOAD string" },
     { "SAVE",   SAVE,   "save code to file",                                  "SAVE string" },
     { "BEEP",   BEEP,   "rings the bell",                                     "BEEP" },
-#if UNIX
+#if FF_SLEEP
     { "SLEEP",  SLEEP,  "sleeps for number of seconds",                       "SLEEP expr" },
 #endif
-#if BIG_TEXT
+#if FF_BIG
     { "BIG",    BIG,    "toggles text embiggening",                           "BIG" },
 #endif
     { "SYSTEM", SYSTEM, "run terminal command",                               "SYSTEM string" },
@@ -126,7 +103,7 @@ struct CommandMapping command_map[] = {
 
 int command_map_size = sizeof(command_map) / sizeof(*command_map);
 
-char *command_to_str(enum Command command)
+static char *command_to_str(enum Command command)
 {
     for (int i = 0; i < command_map_size; i++) {
         if (command_map[i].command == command) {
@@ -162,7 +139,7 @@ struct GrammarMapping grammar_map[] = {
 
 int grammar_map_size = sizeof(grammar_map) / sizeof(*grammar_map);
 
-void print_line(void)
+static void print_line(void)
 {
     for (int i = 0; i < 97; i++) {
         putchar('-');
@@ -170,7 +147,7 @@ void print_line(void)
     putchar('\n');
 }
 
-void print_help(void)
+static void print_help(void)
 {
     print_line();
     printf(" %-8s|  %-52s|  %-25s\n", "command", "description", "usage");
@@ -200,7 +177,7 @@ void print_help(void)
     print_line();
 }
 
-void print_intro(void)
+static void print_intro(void)
 {
     printf("dan's basic interpreter - Copyright (C) 2025 Daniel Tuveson\n");
     printf("press ctrl+d or type 'end' to exit\n");
@@ -234,7 +211,7 @@ struct BObject {
     };
 };
 
-static inline struct BObject *bint_new(int i)
+static struct BObject *bint_new(int i)
 {
     struct BObject *obj = malloc(sizeof(*obj));
     obj->type = BOB_INT;
@@ -242,7 +219,7 @@ static inline struct BObject *bint_new(int i)
     return obj;
 }
 
-static inline struct BObject *bstr_new(char *str, int len)
+static struct BObject *bstr_new(char *str, int len)
 {
     struct BObject *obj = malloc(sizeof(*obj));
     obj->type = BOB_STR;
@@ -253,7 +230,7 @@ static inline struct BObject *bstr_new(char *str, int len)
     return obj;
 }
 
-static inline struct BObject *bvar_new(char c)
+static struct BObject *bvar_new(char c)
 {
     struct BObject *obj = malloc(sizeof(*obj));
     obj->type = BOB_VAR;
@@ -283,7 +260,7 @@ struct Bytecode {
     uint8_t *array;
 };
 
-bool memory_check(struct Memory *memory)
+static bool memory_check(struct Memory *memory)
 {
     if (memory->index >= MAX_LINE_MEMORY) {
         compile_error("cannot allocate more memroy");
@@ -292,14 +269,14 @@ bool memory_check(struct Memory *memory)
     return true;
 }
 
-int memory_add(struct Memory *memory, struct BObject *obj)
+static int memory_add(struct Memory *memory, struct BObject *obj)
 {
     memory->array[memory->index++] = obj;
     return memory->index - 1;
 }
 
 // On success returns memory location where object was placed
-int memory_add_int(struct Memory *memory, int i)
+static int memory_add_int(struct Memory *memory, int i)
 {
     if (!memory_check(memory)) {
         return -1;
@@ -307,7 +284,7 @@ int memory_add_int(struct Memory *memory, int i)
     return memory_add(memory, bint_new(i));
 }
 
-int memory_add_str(struct Memory *memory, char *str, int len)
+static int memory_add_str(struct Memory *memory, char *str, int len)
 {
     if (!memory_check(memory)) {
         return -1;
@@ -315,7 +292,7 @@ int memory_add_str(struct Memory *memory, char *str, int len)
     return memory_add(memory, bstr_new(str, len));
 }
 
-int memory_add_var(struct Memory *memory, char c)
+static int memory_add_var(struct Memory *memory, char c)
 {
     if (!memory_check(memory)) {
         return -1;
@@ -323,7 +300,7 @@ int memory_add_var(struct Memory *memory, char c)
     return memory_add(memory, bvar_new(c));
 }
 
-void memory_clear(struct Memory *memory)
+static void memory_clear(struct Memory *memory)
 {
     if (memory->index > 0) {
         for (int i = 0; i < memory->index; i++) {
@@ -333,7 +310,7 @@ void memory_clear(struct Memory *memory)
     }
 }
 
-void bytecode_add(struct Bytecode *bytecode, uint8_t byte)
+static void bytecode_add(struct Bytecode *bytecode, uint8_t byte)
 {
     if (bytecode->index >= MAX_BYTECODE) {
         return;
@@ -353,7 +330,7 @@ struct Statement {
     struct Bytecode *bytecode;
 };
 
-struct Statement *statement_new(int lineno, char *input, struct Memory *memory,
+static struct Statement *statement_new(int lineno, char *input, struct Memory *memory,
         struct Bytecode *bytecode)
 {
     struct Statement *stmt = malloc(sizeof(*stmt));
@@ -386,7 +363,7 @@ struct Statement *statement_new(int lineno, char *input, struct Memory *memory,
     return stmt;
 }
 
-void statement_free(struct Statement *stmt)
+static void statement_free(struct Statement *stmt)
 {
     free(stmt->line);
     if (stmt->memory) {
@@ -428,10 +405,10 @@ enum Opcode {
     OP_LOAD,
     OP_SAVE,
     OP_HELP,
-#if UNIX
+#if FF_SLEEP
     OP_SLEEP,
 #endif
-#if BIG_TEXT
+#if FF_BIG
     OP_BIG,
 #endif
     OP_SYSTEM,
@@ -451,7 +428,7 @@ enum Opcode {
     OP_DIV
 };
 
-void ignore_whitespace(char **input_ptr)
+static void ignore_whitespace(char **input_ptr)
 {
     char *input = *input_ptr;
     while (isspace(*input)) input++;
@@ -459,40 +436,40 @@ void ignore_whitespace(char **input_ptr)
 }
 
 // Checks if input might be variable name
-bool prefix_var(char c)
+static bool prefix_var(char c)
 {
     return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z');
 }
 
-uint8_t get_var(char c)
+static uint8_t get_var(char c)
 {
     return c >= 'a' ? c - 'a' : c - 'A';
 }
 
-bool prefix_number(char c)
+static bool prefix_number(char c)
 {
     return c == '+' || c == '-' || isdigit(c);
 }
 
 // Checks if input might be numeric expression
-bool prefix_expr(char c)
+static bool prefix_expr(char c)
 {
     return prefix_number(c) || prefix_var(c) || c == '(';
 }
 
-bool prefix_stmt_end(char c)
+static bool prefix_stmt_end(char c)
 {
     return c == '\0' || c == ':';
 }
 
-bool prefix_op(char c)
+static bool prefix_op(char c)
 {
     return c == '+' || c == '-' || c == '*' || c == '/';
 }
 
 // returns number of chars consumed
 // -1 on error
-int parse_lineno(char *input, int *lineno)
+static int parse_lineno(char *input, int *lineno)
 {
     if (!isdigit(*input)) {
         *lineno = 0;
@@ -519,7 +496,7 @@ int parse_lineno(char *input, int *lineno)
 }
 
 // Returns number of chars consumed
-int parse_command_name(char *input, enum Command *command_ptr)
+static int parse_command_name(char *input, enum Command *command_ptr)
 {
     char command[MAX_COMMAND_NAME] = {0};
     int i = 0;
@@ -539,7 +516,7 @@ int parse_command_name(char *input, enum Command *command_ptr)
 }
 
 // Returns number of chars consumed
-int compile_string(char *input, struct Memory *memory, struct Bytecode *bytecode)
+static int compile_string(char *input, struct Memory *memory, struct Bytecode *bytecode)
 {
     input++; // discard opening quote
     char *str_start = input;
@@ -564,7 +541,7 @@ int compile_string(char *input, struct Memory *memory, struct Bytecode *bytecode
     return input - str_start + 2;
 }
 
-int compile_int(char *input, struct Memory *memory, struct Bytecode *bytecode)
+static int compile_int(char *input, struct Memory *memory, struct Bytecode *bytecode)
 {
     char *init_input = input;
 
@@ -575,6 +552,7 @@ int compile_int(char *input, struct Memory *memory, struct Bytecode *bytecode)
     } else if (*input == '+') {
         input++;
     }
+    ignore_whitespace(&input);
 
     int num = 0;
     while (isdigit(*input)) {
@@ -593,7 +571,7 @@ int compile_int(char *input, struct Memory *memory, struct Bytecode *bytecode)
     return input - init_input;
 }
 
-int compile_var(char *input, struct Memory *memory, struct Bytecode *bytecode)
+static int compile_var(char *input, struct Memory *memory, struct Bytecode *bytecode)
 {
     uint8_t var = get_var(*input);
     input++;
@@ -609,7 +587,7 @@ int compile_var(char *input, struct Memory *memory, struct Bytecode *bytecode)
     return 1;
 }
 
-bool push_op(char *stack, int *op_stack_offset, char op)
+static bool push_op(char *stack, int *op_stack_offset, char op)
 {
     if (*op_stack_offset + 1 >= MAX_STACK) {
         compile_error("large expression exhausted operator stack");
@@ -626,7 +604,7 @@ bool push_op(char *stack, int *op_stack_offset, char op)
     return true;
 }
 
-char pop_op(char *stack, int *op_stack_offset)
+static char pop_op(char *stack, int *op_stack_offset)
 {
     char op = stack[*op_stack_offset];
     *op_stack_offset = *op_stack_offset - 1;
@@ -634,7 +612,7 @@ char pop_op(char *stack, int *op_stack_offset)
 }
 
 
-void compile_op(struct Bytecode *bytecode, char op)
+static void compile_op(struct Bytecode *bytecode, char op)
 {
     if (op == '*') {
         bytecode_add(bytecode, OP_MUL);
@@ -659,7 +637,7 @@ void compile_op(struct Bytecode *bytecode, char op)
     op_stack_offset > 0 ? stack[op_stack_offset] : 0
 
 #if DEBUG
-void print_stack(char stack[MAX_STACK], int stack_offset)
+static void print_stack(char stack[MAX_STACK], int stack_offset)
 {
     printf("stack {");
     for (int i = 0; i < stack_offset; i++) {
@@ -672,7 +650,7 @@ void print_stack(char stack[MAX_STACK], int stack_offset)
 }
 #endif
 
-int compile_expr(char *input, struct Memory *memory, struct Bytecode *bytecode)
+static int compile_expr(char *input, struct Memory *memory, struct Bytecode *bytecode)
 {
     char *init_input = input;
     int chars_parsed = 0;
@@ -795,7 +773,7 @@ int compile_expr(char *input, struct Memory *memory, struct Bytecode *bytecode)
 #undef peek
 
 // Returns number of chars parsed
-int compile_print(char *input, struct Memory *memory, struct Bytecode *bytecode)
+static int compile_print(char *input, struct Memory *memory, struct Bytecode *bytecode)
 {
     char *init_input = input;
     do {
@@ -834,7 +812,7 @@ int compile_print(char *input, struct Memory *memory, struct Bytecode *bytecode)
     return input - init_input;
 }
 
-int parse_relop(char *input, enum Opcode *op)
+static int parse_relop(char *input, enum Opcode *op)
 {
     if (*input == '<') {
         input++;
@@ -867,10 +845,10 @@ int parse_relop(char *input, enum Opcode *op)
     return 0;
 }
 
-int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytecode,
+static int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytecode,
         int lineno, enum Command *command_ptr);
 
-int compile_if(char *input, struct Memory *memory, struct Bytecode *bytecode,
+static int compile_if(char *input, struct Memory *memory, struct Bytecode *bytecode,
         int lineno, enum Command *command_ptr)
 {
     char *init_input = input;
@@ -946,7 +924,7 @@ int compile_if(char *input, struct Memory *memory, struct Bytecode *bytecode,
     return input - init_input;
 }
 
-int compile_input(char *input, struct Bytecode *bytecode)
+static int compile_input(char *input, struct Bytecode *bytecode)
 {
     char *init_input = input;
     bool comma = false;
@@ -995,7 +973,7 @@ int compile_input(char *input, struct Bytecode *bytecode)
     return input - init_input;
 }
 
-int compile_let(char *input, struct Memory *memory, struct Bytecode *bytecode)
+static int compile_let(char *input, struct Memory *memory, struct Bytecode *bytecode)
 {
     char *init_input = input;
     if (!prefix_var(*input)) {
@@ -1024,7 +1002,7 @@ int compile_let(char *input, struct Memory *memory, struct Bytecode *bytecode)
     return input - init_input;
 }
 
-int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytecode,
+static int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytecode,
         int lineno, enum Command *command_ptr)
 {
     char *init_input = input;
@@ -1137,7 +1115,7 @@ int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytec
             bytecode_add(bytecode, mem_loc);
             bytecode_add(bytecode, OP_PRINTLN);
             break;
-#if UNIX
+#if FF_SLEEP
         case SLEEP:
             chars_parsed = compile_expr(input, memory, bytecode);
             if (!chars_parsed) {
@@ -1147,7 +1125,7 @@ int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytec
             bytecode_add(bytecode, OP_SLEEP);
             break;
 #endif
-#if BIG_TEXT
+#if FF_BIG
         case BIG:
             bytecode_add(bytecode, OP_BIG);
             break;
@@ -1176,7 +1154,7 @@ int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytec
 
 // Technically someone could come *exactly* up against these limits without going over
 // but to make error checking simpler, I don't care
-bool end_of_user_input_checks(char *input, struct Bytecode *bytecode, struct Memory *memory)
+static bool end_of_user_input_checks(char *input, struct Bytecode *bytecode, struct Memory *memory)
 {
     if (bytecode->index == MAX_BYTECODE) {
         compile_error("generated code too large");
@@ -1196,7 +1174,7 @@ bool end_of_user_input_checks(char *input, struct Bytecode *bytecode, struct Mem
 }
 
 // Returns number of bytes in bytecode
-struct Statement *compile_line(char *input, struct Memory *memory, struct Bytecode *bytecode)
+static struct Statement *compile_line(char *input, struct Memory *memory, struct Bytecode *bytecode)
 {
     ignore_whitespace(&input);
 
@@ -1258,7 +1236,7 @@ enum Status {
     STATUS_ERROR
 };
 
-void program_clear(struct Statement **program)
+static void program_clear(struct Statement **program)
 {
     for (int i = 0; i < MAX_PROG_SIZE; i++) {
         struct Statement *stmt = program[i];
@@ -1269,7 +1247,7 @@ void program_clear(struct Statement **program)
     }
 }
 
-void program_list(struct Statement **program)
+static void program_list(struct Statement **program)
 {
     for (int i = 0; i < MAX_PROG_SIZE; i++) {
         struct Statement *stmt = program[i];
@@ -1279,7 +1257,7 @@ void program_list(struct Statement **program)
     }
 }
 
-int program_save(struct Statement **program, char *filename)
+static int program_save(struct Statement **program, char *filename)
 {
     FILE *file = fopen(filename, "w+");
     if (!file) {
@@ -1295,7 +1273,7 @@ int program_save(struct Statement **program, char *filename)
     return 1;
 }
 
-struct Statement *statement_next(struct Statement **program, int lineno)
+static struct Statement *statement_next(struct Statement **program, int lineno)
 {
     for (int i = lineno; i < MAX_PROG_SIZE; i++) {
         struct Statement *stmt = program[i];
@@ -1320,12 +1298,12 @@ static void runtime_error(struct Statement *stmt, const char *fmt, ...)
     printf("\n");
 }
 
-void bobj_print(struct BObject *obj, struct BObject **vars, bool big_font)
+static void bobj_print(struct BObject *obj, struct BObject **vars, bool big_font)
 {
     if (obj->type == BOB_VAR) {
         obj = vars[obj->bvar];
     }
-#if BIG_TEXT
+#if FF_BIG
     if (big_font) {
         size_t len;
         char *strbuff;
@@ -1356,20 +1334,20 @@ void bobj_print(struct BObject *obj, struct BObject **vars, bool big_font)
             printf("%s", obj->bstr);
         } else {
             runtime_error(NULL, "Internal runtime error: unknown type in PRINT statement");
-#if BIG_TEXT
+#if FF_BIG
         }
 #endif
     }
 }
 
-void bobj_println(struct BObject *obj, struct BObject **vars, bool big_font)
+static void bobj_println(struct BObject *obj, struct BObject **vars, bool big_font)
 {
     bobj_print(obj, vars, big_font);
     printf("\n");
 }
 
 // Compile input into a bunch of OP_LETs - kinda hacky but I can't think of a better way
-struct Statement *execute_input(struct Statement *stmt, int var_count, uint8_t *var_list)
+static struct Statement *execute_input(struct Statement *stmt, int var_count, uint8_t *var_list)
 {
     global_lineno = stmt->lineno;
     char input_arr[MAX_LINE_LENGTH] = {0};
@@ -1482,7 +1460,7 @@ struct Statement *execute_input(struct Statement *stmt, int var_count, uint8_t *
     lnum = obj->bint;\
 } while(0)
 
-enum Status execute_line(
+static enum Status execute_line(
         struct Statement *stmt,
         struct BObject **vars,
         struct Statement **program,
@@ -1672,7 +1650,7 @@ enum Status execute_line(
                     return STATUS_ERROR;
                 }
                 break;
-#if UNIX
+#if FF_SLEEP
             case OP_SLEEP:
                 obj = pop();
                 if (obj->type == BOB_VAR) {
@@ -1685,7 +1663,7 @@ enum Status execute_line(
                 sleep(obj->bint);
                 break;
 #endif
-#if BIG_TEXT
+#if FF_BIG
             case OP_BIG:
                 *big_font_ptr = !*big_font_ptr;
                 break;
@@ -1772,7 +1750,7 @@ enum Status execute_line(
     return status;
 }
 
-void vars_init(struct BObject **vars)
+static void vars_init(struct BObject **vars)
 {
     for (int i = 0; i < MAX_VARS; i++) {
         vars[i] = malloc(sizeof(**vars));
@@ -1781,35 +1759,36 @@ void vars_init(struct BObject **vars)
     }
 }
 
-void vars_free(struct BObject **vars)
+static void vars_free(struct BObject **vars)
 {
     for (int i = 0; i < MAX_VARS; i++) {
         free(vars[i]);
     }
 }
 
-int main(int argc, char *argv[])
+// Loads provided file then executes RUN command
+// If filename is NULL it will drop into the REPL and not execute RUN
+//
+// Probably will split some of this up so that it can be used in a more library-ish way
+int dbi_run_file(char *input_file_name)
 {
-    char *filename;
-    FILE *file = stdin;
+    bool run_file;
+    FILE *file;
 
-    // If run from command line, `run_file = true` will add 'run' statement after file is loaded
-    bool run_file = false;
-
-    if (argc > 2) {
-        runtime_error(NULL, "too many arguments");
-        return 1;
-    } else if (argc == 2) {
-        filename = argv[1];
-        file = fopen(filename, "r");
+    if (input_file_name) {
+        file = fopen(input_file_name, "r");
         run_file = true;
         if (!file) {
             runtime_error(NULL, "%s", strerror(errno));
             return 1;
         }
     } else {
+        file = stdin;
+        run_file = false;
         print_intro();
     }
+
+    char *filename;
 
     struct BObject *vars[MAX_VARS] = {0};
     vars_init(vars);
@@ -1827,7 +1806,7 @@ int main(int argc, char *argv[])
     bool input_error = false;
     bool big_font = false;
 
-    // Fake statement storing data from INPUT command
+    /* Fake statement storing data from INPUT command */
     struct Statement *input_stmt = NULL;
 
     while (true) {
@@ -1853,13 +1832,13 @@ int main(int argc, char *argv[])
                 fclose(file);
                 file = stdin;
                 if (run_file) {
-                    strcpy(input, "run\n");
+                    strcpy(input, "RUN\n");
                 }
             }
         }
 
-        // If user gives a line that exceeds length, ignore fgets input until we're parsed the
-        // whole line
+        /* If user gives a line that exceeds length, ignore fgets input until we're parsed the
+         * whole line */
         if (input[MAX_LINE_LENGTH - 2] != '\0') {
             if (!input_error) {
                 runtime_error(NULL, "input line too long");
@@ -1873,14 +1852,14 @@ int main(int argc, char *argv[])
 
         struct Statement *stmt = compile_line(input, &temp_memory, &temp_bytecode);
         if (!stmt) {
-            // Error
+            /* Error */
             continue;
         } else if (stmt->lineno == 0) {
-            // No line number means we execute the command immediately
+            /* No line number means we execute the command immediately */
             enum Status status = execute_line(stmt, vars, program, run_file,
                     &input_stmt, &filename, &big_font);
 
-            // Clear output parameters
+            /* Clear output parameters */
             run_file = false;
             if (input_stmt != NULL) {
                 statement_free(input_stmt);

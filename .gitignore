@@ -1,3 +1,5 @@
 dbi
 *.o
+*.a
 *.swp
+*.dSYM

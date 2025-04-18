@@ -578,7 +578,7 @@ char *bad_letter[] = { "         "
 
 int letter_map_size = sizeof(letter_map) / sizeof(*letter_map);
 
-void print_big_lookup(char c, int line)
+static void print_big_lookup(char c, int line)
 {
     char cased = toupper(c);
     for (int i = 0; i < letter_map_size; i++) {
@@ -590,7 +590,7 @@ void print_big_lookup(char c, int line)
     printf("%s ", bad_letter[line]);
 }
 
-void print_big(char *input)
+static void print_big(char *input)
 {
     printf("\n");
     char *init_input = input;
