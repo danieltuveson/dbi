@@ -63,6 +63,8 @@ enum Command {
     BIG,
 #endif
     SYSTEM,
+    GETENV,
+    SETENV,
     HELP,
     QUOTE,
 };
@@ -91,14 +93,16 @@ struct CommandMapping command_map[] = {
     { "SAVE",   SAVE,   "save code to file",                                  "SAVE string" },
     { "BEEP",   BEEP,   "rings the bell",                                     "BEEP" },
 #if FF_SLEEP
-    { "SLEEP",  SLEEP,  "sleeps for number of seconds",                       "SLEEP expr" },
+    { "SLEEP",  SLEEP,  "sleeps for number of seconds",                   "SLEEP expr" },
 #endif
 #if FF_BIG
-    { "BIG",    BIG,    "toggles text embiggening",                           "BIG" },
+    { "BIG",    BIG,    "toggles text embiggening",                       "BIG" },
 #endif
-    { "SYSTEM", SYSTEM, "run terminal command",                               "SYSTEM string" },
-    { "QUOTE",  QUOTE,  "an inspirational quote",                             "QUOTE" },
-    { "HELP",   HELP,   "you just ran this",                                  "HELP" },
+    { "SYSTEM", SYSTEM, "run terminal command",                           "SYSTEM string" },
+    { "GETENV", GETENV, "get environment variable",                       "GETENV var = string" },
+    { "SETENV", SETENV, "set environment variable",                       "SETENV string, string" },
+    { "QUOTE",  QUOTE,  "an inspirational quote",                         "QUOTE" },
+    { "HELP",   HELP,   "you just ran this",                              "HELP" },
 };
 
 int command_map_size = sizeof(command_map) / sizeof(*command_map);
@@ -122,11 +126,11 @@ struct GrammarMapping grammar_map[] = {
     { "line",          "number stmt (: stmt)* NL | stmt (: stmt)* NL" },
     { "stmt",          "see 'usage' above" },
     { "cmd",           "one of the commands above" },
-    { "expr-list",     "(string|expr) (, (string|expr) )*" },
+    { "expr-list",     "expr (, expr)*" },
     { "var-list",      "var (, var)*" },
     { "expr",          "term ((+|-) term)*" },
     { "term",          "factor ((*|/) factor)*" },
-    { "factor",        "var | number | (expr)" },
+    { "factor",        "var | number | string | (expr)" },
     { "var",           "A | B | C ... | Y | Z" },
     { "number",        "(+|-|eps) digit digit*" },
     { "digit",         "0 | 1 | 2 | 3 | ... | 8 | 9" },
@@ -221,13 +225,34 @@ static struct BObject *bint_new(int i)
 
 static struct BObject *bstr_new(char *str, int len)
 {
-    struct BObject *obj = malloc(sizeof(*obj));
-    obj->type = BOB_STR;
     char *copy = malloc(len + 1);
     memcpy(copy, str, len);
     copy[len] = '\0';
+
+    struct BObject *obj = malloc(sizeof(*obj));
+    obj->type = BOB_STR;
     obj->bstr = copy;
     return obj;
+}
+
+static void bobj_copy(struct BObject *dest, struct BObject *src)
+{
+    if (src->type == BOB_INT) {
+        dest->type = BOB_INT;
+        dest->bint = src->bint;
+    } else if (src->type == BOB_STR) {
+        if (dest->type == BOB_STR) {
+            free(dest->bstr);
+        }
+        dest->type = BOB_STR;
+        int len = strlen(src->bstr);
+        char *copy = malloc(len + 1);
+        memcpy(copy, src->bstr, len);
+        copy[len] = '\0';
+        dest->bstr = copy;
+    } else {
+        assert(0);
+    }
 }
 
 static struct BObject *bvar_new(char c)
@@ -454,7 +479,7 @@ static bool prefix_number(char c)
 // Checks if input might be numeric expression
 static bool prefix_expr(char c)
 {
-    return prefix_number(c) || prefix_var(c) || c == '(';
+    return prefix_number(c) || prefix_var(c) || c == '(' || c == '"';
 }
 
 static bool prefix_stmt_end(char c)
@@ -732,6 +757,12 @@ static int compile_expr(char *input, struct Memory *memory, struct Bytecode *byt
                     return 0;
                 }
                 input += chars_parsed;
+            } else if (*input == '"') {
+                chars_parsed = compile_string(input, memory, bytecode);
+                if (!chars_parsed) {
+                    return 0;
+                }
+                input += chars_parsed;
             } else if (prefix_var(*input)) {
                 chars_parsed = compile_var(input, memory, bytecode);
                 if (!chars_parsed) {
@@ -780,9 +811,7 @@ static int compile_print(char *input, struct Memory *memory, struct Bytecode *by
         int char_count = 0;
 
         ignore_whitespace(&input);
-        if (*input == '"') {
-            char_count = compile_string(input, memory, bytecode);
-        } else if (prefix_expr(*input)) {
+        if (prefix_expr(*input)) {
             char_count = compile_expr(input, memory, bytecode);
         } else if (prefix_stmt_end(*input)) {
             compile_error("unexpected end of statement");
@@ -937,11 +966,10 @@ static int compile_input(char *input, struct Bytecode *bytecode)
     uint8_t count_index = bytecode->index;
     bytecode_add(bytecode, 0);
 
-    while (*input != 0) {
+    while (true) {
         if (comma) {
             if (*input != ',') {
-                compile_error("expected comma");
-                return 0;
+                break;
             }
         } else {
             if (!prefix_var(*input)) {
@@ -1019,6 +1047,13 @@ static int compile_statement(char *input, struct Memory *memory, struct Bytecode
 
     // Parse based on command
     int mem_loc;
+    if (command == SAVE || command == LOAD || command == SLEEP || command == SYSTEM) {
+        chars_parsed = compile_expr(input, memory, bytecode);
+        if (!chars_parsed) {
+            return 0;
+        }
+        input += chars_parsed;
+    }
     switch (command) {
         case PRINT:
             chars_parsed = compile_print(input, memory, bytecode);
@@ -1029,14 +1064,14 @@ static int compile_statement(char *input, struct Memory *memory, struct Bytecode
             break;
         case IF:
             chars_parsed = compile_if(input, memory, bytecode, lineno, command_ptr);
-            if (chars_parsed == 0) {
+            if (!chars_parsed) {
                 return 0;
             }
             input += chars_parsed;
             break;
         case INPUT:
             chars_parsed = compile_input(input, bytecode);
-            if (chars_parsed == 0) {
+            if (!chars_parsed) {
                 return 0;
             }
             input += chars_parsed;
@@ -1085,17 +1120,10 @@ static int compile_statement(char *input, struct Memory *memory, struct Bytecode
             while (*input != '\0') input++;
             break;
         case LOAD:
+            bytecode_add(bytecode, OP_LOAD);
+            break;
         case SAVE:
-            if (*input != '"') {
-                compile_error("expected file name\n");
-                return 0;
-            }
-            chars_parsed = compile_string(input, memory, bytecode);
-            if (chars_parsed == 0) {
-                return 0;
-            }
-            input += chars_parsed;
-            bytecode_add(bytecode, command == LOAD ? OP_LOAD : OP_SAVE);
+            bytecode_add(bytecode, OP_SAVE);
             break;
         case QUOTE:
             mem_loc = memory_add_str(memory, quote, strlen(quote));
@@ -1117,11 +1145,6 @@ static int compile_statement(char *input, struct Memory *memory, struct Bytecode
             break;
 #if FF_SLEEP
         case SLEEP:
-            chars_parsed = compile_expr(input, memory, bytecode);
-            if (!chars_parsed) {
-                return 0;
-            }
-            input += chars_parsed;
             bytecode_add(bytecode, OP_SLEEP);
             break;
 #endif
@@ -1131,15 +1154,6 @@ static int compile_statement(char *input, struct Memory *memory, struct Bytecode
             break;
 #endif
         case SYSTEM:
-            if (*input != '"') {
-                compile_error("expected command\n");
-                return 0;
-            }
-            chars_parsed = compile_string(input, memory, bytecode);
-            if (chars_parsed == 0) {
-                return 0;
-            }
-            input += chars_parsed;
             bytecode_add(bytecode, OP_SYSTEM);
             break;
         case HELP:
@@ -1438,25 +1452,33 @@ static struct Statement *execute_input(struct Statement *stmt, int var_count, ui
 #define pop_sub()\
     callstack[callstack_offset--]
 
+#define expect_int(in) do {\
+    if (obj->type == BOB_VAR) {\
+        obj = vars[obj->bvar];\
+    }\
+    if (obj->type != BOB_INT) {\
+        runtime_error(stmt, "expected integer %s", in);\
+        return STATUS_ERROR;\
+    }\
+} while(0)
+
+#define expect_string(in) do {\
+    if (obj->type == BOB_VAR) {\
+        obj = vars[obj->bvar];\
+    }\
+    if (obj->type != BOB_STR) {\
+        runtime_error(stmt, "expected string %s", in);\
+        return STATUS_ERROR;\
+    }\
+} while(0)
+
 // Boilerplate checking for arithmatic expressions
 #define math_boilerplate() do {\
     obj = pop();\
-    if (obj->type == BOB_VAR) {\
-        obj = vars[obj->bvar];\
-    }\
-    if (obj->type != BOB_INT) {\
-        runtime_error(stmt, "non-integer in arithmatic expression");\
-        return STATUS_ERROR;\
-    }\
+    expect_int("in arithmatic expression");\
     rnum = obj->bint;\
     obj = pop();\
-    if (obj->type == BOB_VAR) {\
-        obj = vars[obj->bvar];\
-    }\
-    if (obj->type != BOB_INT) {\
-        runtime_error(stmt, "non-integer in arithmatic expression");\
-        return STATUS_ERROR;\
-    }\
+    expect_int("in arithmatic expression");\
     lnum = obj->bint;\
 } while(0)
 
@@ -1563,10 +1585,10 @@ static enum Status execute_line(
                 mem_loc = stmt->bytecode->array[++ip];
                 if (obj->type == BOB_VAR) {
                     if (mem_loc != obj->bvar) {
-                        memcpy(vars[mem_loc], vars[obj->bvar], sizeof(**vars));
+                        bobj_copy(vars[mem_loc], vars[obj->bvar]);
                     }
                 } else {
-                    memcpy(vars[mem_loc], obj, sizeof(**vars));
+                    bobj_copy(vars[mem_loc], obj);
                 }
                 break;
             case OP_JMP:
@@ -1641,10 +1663,12 @@ static enum Status execute_line(
                 return STATUS_GOOD;
             case OP_LOAD:
                 obj = pop();
+                expect_string("argument for LOAD command");
                 *filename_ptr = obj->bstr;
                 return STATUS_LOAD;
             case OP_SAVE:
                 obj = pop();
+                expect_string("argument for SAVE command");
                 if (!program_save(program, obj->bstr)) {
                     runtime_error(stmt, "%s", strerror(errno));
                     return STATUS_ERROR;
@@ -1653,13 +1677,7 @@ static enum Status execute_line(
 #if FF_SLEEP
             case OP_SLEEP:
                 obj = pop();
-                if (obj->type == BOB_VAR) {
-                    obj = vars[obj->bvar];
-                }
-                if (obj->type != BOB_INT) {
-                    runtime_error(stmt, "cannot use string value for SLEEP");
-                    return STATUS_ERROR;
-                }
+                expect_int("argument for SLEEP command");
                 sleep(obj->bint);
                 break;
 #endif
@@ -1670,13 +1688,7 @@ static enum Status execute_line(
 #endif
             case OP_SYSTEM:
                 obj = pop();
-                if (obj->type == BOB_VAR) {
-                    obj = vars[obj->bvar];
-                }
-                if (obj->type != BOB_STR) {
-                    runtime_error(stmt, "cannot use integer value for SYSTEM");
-                    return STATUS_ERROR;
-                }
+                expect_string("argument for SYSTEM command");
                 int err = system(obj->bstr);
                 if (err == -1) {
                     runtime_error(stmt, "%s", strerror(errno));
@@ -1762,6 +1774,9 @@ static void vars_init(struct BObject **vars)
 static void vars_free(struct BObject **vars)
 {
     for (int i = 0; i < MAX_VARS; i++) {
+        if (vars[i]->type == BOB_STR) {
+            free(vars[i]->bstr);
+        }
         free(vars[i]);
     }
 }
