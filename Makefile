@@ -20,6 +20,10 @@ uninstall:
 	@sudo rm -f /usr/local/bin/dbi
 	@sudo rm -f /usr/local/include/dbi.h
 
+example: libdbi.a example.o dbi.h
+	@make install
+	$(CC) $(CFLAGS) $(objects) example.o -o example
+
 test: dbi
 	@./dbi tests/test.bas
 

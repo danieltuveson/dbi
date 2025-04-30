@@ -10,6 +10,9 @@
 #include <errno.h>
 #include "dbi.h"
 
+#define FF_SLEEP 1
+#define FF_BIG 1
+
 #if FF_BIG
 #include "bigtext.c"
 #endif
@@ -17,6 +20,9 @@
 #if FF_SLEEP
 #include <unistd.h>
 #endif
+
+// Hardcoded since variables can only be A-Z 
+#define MAX_VARS 26
 
 // This is the only mutable global variable. It is just used for making error messages nice.
 static int global_lineno = 0;
@@ -39,39 +45,45 @@ static void compile_error(const char *fmt, ...)
 // ***************************** Commands ****************************
 // *******************************************************************
 
-enum Command {
-    UNDEFINED,
-    PRINT,
-    IF,
-    GOTO,
-    INPUT,
-    LET,
-    GOSUB,
-    RETURN,
-    CLEAR,
-    LIST,
-    RUN,
-    END,
-    REM,
-    LOAD,
-    SAVE,
-    BEEP,
-#if FF_SLEEP
-    SLEEP,
-#endif
-#if FF_BIG
-    BIG,
-#endif
-    SYSTEM,
-    GETENV,
-    SETENV,
-    HELP,
-    QUOTE,
+enum DbiCommand {
+    DBI_UNDEFINED, DBI_PRINT,   DBI_IF,      DBI_GOTO,
+    DBI_INPUT,     DBI_LET,     DBI_GOSUB,   DBI_RETURN,
+    DBI_CLEAR,     DBI_LIST,    DBI_RUN,     DBI_QUOTE,
+    DBI_REM,       DBI_LOAD,    DBI_SAVE,    DBI_BEEP,
+    DBI_SLEEP,     DBI_BIG,     DBI_SYSTEM,  DBI_HELP,
+    DBI_END
 };
+
+// Note: Other parts of the code assume that DBI_END is the largest value in this list.
+//       If new commands are added to this list, add them before DBI_END.
+#define LAST_COMMAND DBI_END
+
+// Make it so commands can be overriden in dbi.h
+#define UNDEFINED DBI_UNDEFINED
+#define PRINT     DBI_PRINT
+#define INPUT     DBI_INPUT
+#define CLEAR     DBI_CLEAR
+#define REM       DBI_REM  
+#define SLEEP     DBI_SLEEP
+#define QUOTE     DBI_QUOTE
+#define IF        DBI_IF
+#define LET       DBI_LET
+#define LIST      DBI_LIST
+#define LOAD      DBI_LOAD
+#define BIG       DBI_BIG
+#define GOTO      DBI_GOTO
+#define GOSUB     DBI_GOSUB
+#define RUN       DBI_RUN
+#define SAVE      DBI_SAVE
+#define SYSTEM    DBI_SYSTEM
+#define RETURN    DBI_RETURN
+#define END       DBI_END
+#define BEEP      DBI_BEEP
+#define HELP      DBI_HELP
 
 struct CommandMapping {
     char *str;
-    enum Command command;
+    enum DbiCommand command;
     char *helpstr;
     char *helpex;
 };
@@ -89,8 +101,8 @@ struct CommandMapping command_map[] = {
     { "RUN",    RUN,    "execute loaded code",                                "RUN" },
     { "END",    END,    "end execution of program",                           "END" },
     { "REM",    REM,    "adds a comment",                                     "REM comment" },
-    { "LOAD",   LOAD,   "load code from file",                                "LOAD string" },
-    { "SAVE",   SAVE,   "save code to file",                                  "SAVE string" },
+    { "LOAD",   LOAD,   "load code from file",                                "LOAD expr" },
+    { "SAVE",   SAVE,   "save code to file",                                  "SAVE expr" },
     { "BEEP",   BEEP,   "rings the bell",                                     "BEEP" },
 #if FF_SLEEP
     { "SLEEP",  SLEEP,  "sleeps for number of seconds",                   "SLEEP expr" },
@@ -98,19 +110,18 @@ struct CommandMapping command_map[] = {
 #if FF_BIG
     { "BIG",    BIG,    "toggles text embiggening",                       "BIG" },
 #endif
-    { "SYSTEM", SYSTEM, "run terminal command",                           "SYSTEM string" },
-    { "GETENV", GETENV, "get environment variable",                       "GETENV var = string" },
-    { "SETENV", SETENV, "set environment variable",                       "SETENV string, string" },
+    { "SYSTEM", SYSTEM, "run terminal command",                           "SYSTEM expr" },
     { "QUOTE",  QUOTE,  "an inspirational quote",                         "QUOTE" },
     { "HELP",   HELP,   "you just ran this",                              "HELP" },
 };
 
 int command_map_size = sizeof(command_map) / sizeof(*command_map);
 
-static char *command_to_str(enum Command command)
+static char *command_to_str(enum DbiCommand command)
 {
     for (int i = 0; i < command_map_size; i++) {
-        if (command_map[i].command == command) {
+        enum DbiCommand command_i = command_map[i].command;
+        if (command_i != UNDEFINED && command_i == command) {
             return command_map[i].str;
         }
     }
@@ -165,7 +176,9 @@ static void print_help(void)
     putchar('\n');
     for (int i = 0; i < command_map_size; i++) {
         struct CommandMapping cm = command_map[i];
-        printf(" %-8s|  %-52s|  %-25s\n", cm.str, cm.helpstr, cm.helpex);
+        if (cm.command != UNDEFINED) {
+            printf(" %-8s|  %-52s|  %-25s\n", cm.str, cm.helpstr, cm.helpex);
+        }
     }
     print_line();
     for (int i = 0; i < grammar_map_size; i++) {
@@ -200,51 +213,36 @@ char *quote =
 // ************************** Basic Objects **************************
 // *******************************************************************
 
-enum BobType {
-    BOB_INT,
-    BOB_STR,
-    BOB_VAR
-};
-
-struct BObject {
-    enum BobType type;
-    union {
-        int bint;
-        char *bstr;
-        uint8_t bvar;
-    };
-};
-
-static struct BObject *bint_new(int i)
+static struct DbiObject *bint_new(int i)
 {
-    struct BObject *obj = malloc(sizeof(*obj));
-    obj->type = BOB_INT;
+    struct DbiObject *obj = malloc(sizeof(*obj));
+    obj->type = DBI_INT;
     obj->bint = i;
     return obj;
 }
 
-static struct BObject *bstr_new(char *str, int len)
+static struct DbiObject *bstr_new(char *str, int len)
 {
     char *copy = malloc(len + 1);
     memcpy(copy, str, len);
     copy[len] = '\0';
 
-    struct BObject *obj = malloc(sizeof(*obj));
-    obj->type = BOB_STR;
+    struct DbiObject *obj = malloc(sizeof(*obj));
+    obj->type = DBI_STR;
     obj->bstr = copy;
     return obj;
 }
 
-static void bobj_copy(struct BObject *dest, struct BObject *src)
+static void bobj_copy(struct DbiObject *dest, struct DbiObject *src)
 {
-    if (src->type == BOB_INT) {
-        dest->type = BOB_INT;
+    if (src->type == DBI_INT) {
+        dest->type = DBI_INT;
         dest->bint = src->bint;
-    } else if (src->type == BOB_STR) {
-        if (dest->type == BOB_STR) {
+    } else if (src->type == DBI_STR) {
+        if (dest->type == DBI_STR) {
             free(dest->bstr);
         }
-        dest->type = BOB_STR;
+        dest->type = DBI_STR;
         int len = strlen(src->bstr);
         char *copy = malloc(len + 1);
         memcpy(copy, src->bstr, len);
@@ -255,18 +253,18 @@ static void bobj_copy(struct BObject *dest, struct BObject *src)
     }
 }
 
-static struct BObject *bvar_new(char c)
+static struct DbiObject *bvar_new(char c)
 {
-    struct BObject *obj = malloc(sizeof(*obj));
-    obj->type = BOB_VAR;
+    struct DbiObject *obj = malloc(sizeof(*obj));
+    obj->type = DBI_VAR;
     obj->bvar = c;
     return obj;
 }
 
-static void bobj_free(struct BObject *obj)
+static void bobj_free(struct DbiObject *obj)
 {
     assert(obj);
-    if (obj->type == BOB_STR) {
+    if (obj->type == DBI_STR) {
         free(obj->bstr);
     }
     free(obj);
@@ -277,7 +275,7 @@ static void bobj_free(struct BObject *obj)
 // *******************************************************************
 struct Memory {
     int index;
-    struct BObject **array;
+    struct DbiObject **array;
 };
 
 struct Bytecode {
@@ -287,14 +285,14 @@ struct Bytecode {
 
 static bool memory_check(struct Memory *memory)
 {
-    if (memory->index >= MAX_LINE_MEMORY) {
+    if (memory->index >= DBI_MAX_LINE_MEMORY) {
         compile_error("cannot allocate more memroy");
         return false;
     }
     return true;
 }
 
-static int memory_add(struct Memory *memory, struct BObject *obj)
+static int memory_add(struct Memory *memory, struct DbiObject *obj)
 {
     memory->array[memory->index++] = obj;
     return memory->index - 1;
@@ -337,7 +335,7 @@ static void memory_clear(struct Memory *memory)
 
 static void bytecode_add(struct Bytecode *bytecode, uint8_t byte)
 {
-    if (bytecode->index >= MAX_BYTECODE) {
+    if (bytecode->index >= DBI_MAX_BYTECODE) {
         return;
     }
     bytecode->array[bytecode->index++] = byte;
@@ -350,7 +348,7 @@ static void bytecode_add(struct Bytecode *bytecode, uint8_t byte)
 struct Statement {
     int lineno;
     char *line;
-    // list of BObjects used by statement
+    // list of DbiObjects used by statement
     struct Memory *memory;
     struct Bytecode *bytecode;
 };
@@ -403,9 +401,100 @@ static void statement_free(struct Statement *stmt)
     free(stmt);
 }
 
+static void program_clear(struct Statement **program)
+{
+    for (int i = 0; i < DBI_MAX_PROG_SIZE; i++) {
+        struct Statement *stmt = program[i];
+        if (stmt) {
+            statement_free(stmt);
+        }
+        program[i] = NULL;
+    }
+}
+
+static void program_list(struct Statement **program)
+{
+    for (int i = 0; i < DBI_MAX_PROG_SIZE; i++) {
+        struct Statement *stmt = program[i];
+        if (stmt) {
+            printf("%s", stmt->line);
+        }
+    }
+}
+
+static int program_save(struct Statement **program, char *filename)
+{
+    FILE *file = fopen(filename, "w+");
+    if (!file) {
+        return 0;
+    }
+    for (int i = 0; i < DBI_MAX_PROG_SIZE; i++) {
+        struct Statement *stmt = program[i];
+        if (stmt) {
+            fprintf(file, "%s", stmt->line);
+        }
+    }
+    fclose(file);
+    return 1;
+}
+
+static struct Statement *statement_next(struct Statement **program, int lineno)
+{
+    for (int i = lineno; i < DBI_MAX_PROG_SIZE; i++) {
+        struct Statement *stmt = program[i];
+        if (stmt) {
+            return stmt;
+        }
+    }
+    return NULL;
+}
+
 // *******************************************************************
 // *********************** Parsing / Compiling *********************** 
 // *******************************************************************
+
+struct ForeignCall {
+    int argc;
+    char *name;
+    int extended_command_code; // Numeric value of command, as if it were in enum DbiCommand
+    DbiForeignCall call;
+    struct ForeignCall *next;
+};
+
+struct Program {
+    struct Statement **statements;
+    struct ForeignCall *foreign_calls;
+    DbiForeignCall *foreign_call_table;
+    bool has_compiled;
+};
+
+DbiProgram dbi_program_new(void)
+{
+    struct Program *program = malloc(sizeof(*program));
+    program->statements = calloc(DBI_MAX_PROG_SIZE, sizeof(*program->statements));
+    program->has_compiled = false;
+    program->foreign_calls = NULL;
+    return (DbiProgram) program;
+}
+
+void foreign_calls_free(struct ForeignCall *fc)
+{
+    while (fc != NULL) {
+        struct ForeignCall *fc_temp = fc->next;
+        free(fc);
+        fc = fc_temp;
+    }
+}
+
+void dbi_program_free(DbiProgram prog)
+{
+    assert(prog != 0);
+    struct Program *program = (struct Program *) prog;
+    program_clear(program->statements);
+    free(program->foreign_call_table);
+    free(program->statements);
+    free(program);
+}
 
 enum Opcode {
     // No-op
@@ -437,6 +526,8 @@ enum Opcode {
     OP_BIG,
 #endif
     OP_SYSTEM,
+    OP_FFI_CALL,
+    OP_FFI_ARG,
 
     // Comparison operators
     OP_LT,
@@ -504,7 +595,7 @@ static int parse_lineno(char *input, int *lineno)
     int i = 0;
     while (isdigit(input[i])) {
         if (i > 4) {
-            compile_error("line number exceeds maximum value of %d", MAX_PROG_SIZE - 1);
+            compile_error("line number exceeds maximum value of %d", DBI_MAX_PROG_SIZE - 1);
             global_lineno = -1;
             return -1;
         }
@@ -521,20 +612,30 @@ static int parse_lineno(char *input, int *lineno)
 }
 
 // Returns number of chars consumed
-static int parse_command_name(char *input, enum Command *command_ptr)
+static int parse_command_name(char *input, struct ForeignCall *foreign_calls, 
+        enum DbiCommand *command_ptr)
 {
-    char command[MAX_COMMAND_NAME] = {0};
+    char command[DBI_MAX_COMMAND_NAME] = {0};
     int i = 0;
-    while (i < MAX_COMMAND_NAME && prefix_var(input[i])) {
+    while (i < DBI_MAX_COMMAND_NAME && prefix_var(input[i])) {
         command[i] = toupper(input[i]);
         i++;
     }
     for (int j = 0; j < command_map_size; j++) {
         int len = strlen(command_map[j].str);
-        if (i == len && strncmp(command, command_map[j].str, len) == 0) {
+        if (i == len && command_map[j].command != UNDEFINED
+                && strncmp(command, command_map[j].str, len) == 0) {
             *command_ptr = command_map[j].command;
             return i;
         }
+    }
+    for (int j = 0; foreign_calls != NULL; j++) {
+        int len = strlen(foreign_calls->name);
+        if (i == len && strncmp(command, foreign_calls->name, len) == 0) {
+            *command_ptr = foreign_calls->extended_command_code;
+            return i;
+        }
+        foreign_calls = foreign_calls->next;
     }
     compile_error("unknown command");
     return 0;
@@ -614,7 +715,7 @@ static int compile_var(char *input, struct Memory *memory, struct Bytecode *byte
 
 static bool push_op(char *stack, int *op_stack_offset, char op)
 {
-    if (*op_stack_offset + 1 >= MAX_STACK) {
+    if (*op_stack_offset + 1 >= DBI_MAX_STACK) {
         compile_error("large expression exhausted operator stack");
         return false;
     }
@@ -662,7 +763,7 @@ static void compile_op(struct Bytecode *bytecode, char op)
     op_stack_offset > 0 ? stack[op_stack_offset] : 0
 
 #if DEBUG
-static void print_stack(char stack[MAX_STACK], int stack_offset)
+static void print_stack(char stack[DBI_MAX_STACK], int stack_offset)
 {
     printf("stack {");
     for (int i = 0; i < stack_offset; i++) {
@@ -681,7 +782,7 @@ static int compile_expr(char *input, struct Memory *memory, struct Bytecode *byt
     int chars_parsed = 0;
 
     // shunting yard
-    char stack[MAX_STACK];
+    char stack[DBI_MAX_STACK];
     int op_stack_offset = 0;
     int mode_op = 0;
     char op = 0;
@@ -804,9 +905,12 @@ static int compile_expr(char *input, struct Memory *memory, struct Bytecode *byt
 #undef peek
 
 // Returns number of chars parsed
-static int compile_print(char *input, struct Memory *memory, struct Bytecode *bytecode)
+static int compile_print_like(char *input, struct Memory *memory, struct Bytecode *bytecode,
+        enum Opcode op, int num_args)
 {
     char *init_input = input;
+    ignore_whitespace(&input);
+    int arg_count = 0;
     do {
         int char_count = 0;
 
@@ -824,21 +928,30 @@ static int compile_print(char *input, struct Memory *memory, struct Bytecode *by
         if (!char_count) {
             return 0;
         }
-        bytecode_add(bytecode, OP_PRINT);
+        bytecode_add(bytecode, op);
         input += char_count;
 
         ignore_whitespace(&input);
+        arg_count++;
         if (*input == ',') {
             input++;
         } else {
             break;
         }
     } while (true);
-
-    // Kind of hacky, but whatever
-    bytecode->array[bytecode->index - 1] = OP_PRINTLN;
+    if (num_args != -1 && arg_count != num_args) {
+        compile_error("expected %d arguments but got %d", num_args, arg_count);
+    }
 
     return input - init_input;
+}
+
+static int compile_print(char *input, struct Memory *memory, struct Bytecode *bytecode)
+{
+    int char_count = compile_print_like(input, memory, bytecode, OP_PRINT, -1);
+    // Kind of hacky, but whatever
+    bytecode->array[bytecode->index - 1] = OP_PRINTLN;
+    return char_count;
 }
 
 static int parse_relop(char *input, enum Opcode *op)
@@ -874,11 +987,13 @@ static int parse_relop(char *input, enum Opcode *op)
     return 0;
 }
 
-static int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytecode,
-        int lineno, enum Command *command_ptr);
+static int compile_statement(char *input, struct ForeignCall *foreign_calls,
+        struct Memory *memory, struct Bytecode *bytecode,
+        int lineno, enum DbiCommand *command_ptr);
 
-static int compile_if(char *input, struct Memory *memory, struct Bytecode *bytecode,
-        int lineno, enum Command *command_ptr)
+static int compile_if(char *input, struct ForeignCall *foreign_calls, 
+        struct Memory *memory, struct Bytecode *bytecode,
+        int lineno, enum DbiCommand *command_ptr)
 {
     char *init_input = input;
 
@@ -938,7 +1053,7 @@ static int compile_if(char *input, struct Memory *memory, struct Bytecode *bytec
     }
 
     // Parse statement
-    char_count = compile_statement(input, memory, bytecode, lineno, command_ptr);
+    char_count = compile_statement(input, foreign_calls, memory, bytecode, lineno, command_ptr);
     if (!char_count) {
         return 0;
     }
@@ -1001,7 +1116,9 @@ static int compile_input(char *input, struct Bytecode *bytecode)
     return input - init_input;
 }
 
-static int compile_let(char *input, struct Memory *memory, struct Bytecode *bytecode)
+// Generic method for compiling commands similar to LET
+static int compile_let_like(char *input, struct Memory *memory, struct Bytecode *bytecode,
+        char *command_name, enum Opcode op)
 {
     char *init_input = input;
     if (!prefix_var(*input)) {
@@ -1013,7 +1130,7 @@ static int compile_let(char *input, struct Memory *memory, struct Bytecode *byte
 
     ignore_whitespace(&input);
     if (*input != '=') {
-        compile_error("missing '=' in LET statement");
+        compile_error("missing '=' in %s statement", command_name);
         return 0;
     }
     input++;
@@ -1025,19 +1142,40 @@ static int compile_let(char *input, struct Memory *memory, struct Bytecode *byte
     }
     input += chars_parsed;
 
-    bytecode_add(bytecode, OP_LET);
+    bytecode_add(bytecode, op);
     bytecode_add(bytecode, var);
     return input - init_input;
 }
 
-static int compile_statement(char *input, struct Memory *memory, struct Bytecode *bytecode,
-        int lineno, enum Command *command_ptr)
+static int compile_let(char *input, struct Memory *memory, struct Bytecode *bytecode)
+{
+    return compile_let_like(input, memory, bytecode, "LET", OP_LET);
+}
+
+static bool compile_foreign(struct ForeignCall *foreign_call, struct Memory *memory,
+        struct Bytecode *bytecode)
+{
+    int ffi_index = foreign_call->extended_command_code - LAST_COMMAND - 1;
+    assert(ffi_index >= 0);
+    int mem_loc = memory_add_int(memory, ffi_index);
+    if (mem_loc == -1) {
+        return false;
+    }
+    bytecode_add(bytecode, OP_PUSH);
+    bytecode_add(bytecode, mem_loc);
+    bytecode_add(bytecode, OP_FFI_CALL);
+    return true;
+}
+
+static int compile_statement(char *input, struct ForeignCall *foreign_calls,
+        struct Memory *memory, struct Bytecode *bytecode,
+        int lineno, enum DbiCommand *command_ptr)
 {
     char *init_input = input;
 
     // Get command
-    enum Command command;
-    int chars_parsed = parse_command_name(input, &command);
+    enum DbiCommand command;
+    int chars_parsed = parse_command_name(input, foreign_calls, &command);
     if (!chars_parsed) {
         return 0;
     }
@@ -1063,7 +1201,7 @@ static int compile_statement(char *input, struct Memory *memory, struct Bytecode
             input += chars_parsed;
             break;
         case IF:
-            chars_parsed = compile_if(input, memory, bytecode, lineno, command_ptr);
+            chars_parsed = compile_if(input, foreign_calls, memory, bytecode, lineno, command_ptr);
             if (!chars_parsed) {
                 return 0;
             }
@@ -1160,8 +1298,27 @@ static int compile_statement(char *input, struct Memory *memory, struct Bytecode
             bytecode_add(bytecode, OP_HELP);
             break;
         default:
-            compile_error("command not implemented");
-            return 0;
+            for (int i = 0; foreign_calls != NULL; i++) {
+                if (foreign_calls->extended_command_code == (int) command) {
+                    break;
+                }
+                foreign_calls = foreign_calls->next;
+            }
+            if (foreign_calls == NULL) {
+                compile_error("command not implemented");
+                return 0;
+            }
+            if (foreign_calls->argc != 0) {
+                chars_parsed = compile_print_like(input, memory, bytecode, OP_FFI_ARG,
+                        foreign_calls->argc);
+                if (!chars_parsed) {
+                    return 0;
+                }
+                input += chars_parsed;
+            }
+            if (!compile_foreign(foreign_calls, memory, bytecode)) {
+                return 0;
+            }
     }
     return input - init_input;
 }
@@ -1170,11 +1327,11 @@ static int compile_statement(char *input, struct Memory *memory, struct Bytecode
 // but to make error checking simpler, I don't care
 static bool end_of_user_input_checks(char *input, struct Bytecode *bytecode, struct Memory *memory)
 {
-    if (bytecode->index == MAX_BYTECODE) {
+    if (bytecode->index == DBI_MAX_BYTECODE) {
         compile_error("generated code too large");
         return false;
     }
-    if (memory->index == MAX_LINE_MEMORY) {
+    if (memory->index == DBI_MAX_LINE_MEMORY) {
         compile_error("generated code exceeds memory usage limit");
         return false;
     }
@@ -1188,7 +1345,8 @@ static bool end_of_user_input_checks(char *input, struct Bytecode *bytecode, str
 }
 
 // Returns number of bytes in bytecode
-static struct Statement *compile_line(char *input, struct Memory *memory, struct Bytecode *bytecode)
+static struct Statement *compile_line(char *input, struct ForeignCall *foreign_calls,
+        struct Memory *memory, struct Bytecode *bytecode)
 {
     ignore_whitespace(&input);
 
@@ -1211,8 +1369,8 @@ static struct Statement *compile_line(char *input, struct Memory *memory, struct
     do {
         ignore_whitespace(&input);
 
-        enum Command command;
-        chars_parsed = compile_statement(input, memory, bytecode, lineno, &command);
+        enum DbiCommand command;
+        chars_parsed = compile_statement(input, foreign_calls, memory, bytecode, lineno, &command);
         if (!chars_parsed) {
             memory_clear(memory);
             return NULL;
@@ -1242,60 +1400,58 @@ static struct Statement *compile_line(char *input, struct Memory *memory, struct
 // *******************************************************************
 // ************************* VM / Execution ************************** 
 // *******************************************************************
-
-enum Status {
-    STATUS_GOOD,
-    STATUS_FINISHED,
-    STATUS_LOAD,
-    STATUS_ERROR
+struct Runtime {
+    struct DbiObject **vars;
+    void *context;
+    bool run_file;
+    struct Statement *input_stmt;
+    char *filename;
+    bool big_font;
+    // Current args
+    int ffi_argc;
+    struct DbiObject **ffi_argv;
 };
 
-static void program_clear(struct Statement **program)
+static void objs_init(struct DbiObject **vars, int count)
 {
-    for (int i = 0; i < MAX_PROG_SIZE; i++) {
-        struct Statement *stmt = program[i];
-        if (stmt) {
-            statement_free(stmt);
-        }
-        program[i] = NULL;
+    for (int i = 0; i < count; i++) {
+        vars[i] = malloc(sizeof(**vars));
+        vars[i]->type = DBI_INT;
+        vars[i]->bint = 0;
     }
 }
 
-static void program_list(struct Statement **program)
+static void objs_free(struct DbiObject **vars, int count)
 {
-    for (int i = 0; i < MAX_PROG_SIZE; i++) {
-        struct Statement *stmt = program[i];
-        if (stmt) {
-            printf("%s", stmt->line);
+    for (int i = 0; i < count; i++) {
+        if (vars[i]->type == DBI_STR && vars[i]->bstr != NULL) {
+            free(vars[i]->bstr);
         }
+        free(vars[i]);
     }
 }
 
-static int program_save(struct Statement **program, char *filename)
+DbiRuntime dbi_runtime_new(void)
 {
-    FILE *file = fopen(filename, "w+");
-    if (!file) {
-        return 0;
-    }
-    for (int i = 0; i < MAX_PROG_SIZE; i++) {
-        struct Statement *stmt = program[i];
-        if (stmt) {
-            fprintf(file, "%s", stmt->line);
-        }
-    }
-    fclose(file);
-    return 1;
+    struct Runtime *runtime = malloc(sizeof(*runtime));
+    memset(runtime, 0, sizeof(*runtime));
+    runtime->vars = calloc(MAX_VARS, sizeof(*runtime->vars));
+    objs_init(runtime->vars, MAX_VARS);
+
+    // Shouldn't be possible to have more command args than memory
+    runtime->ffi_argv = calloc(DBI_MAX_LINE_MEMORY, sizeof(*runtime->ffi_argv));
+    objs_init(runtime->ffi_argv, DBI_MAX_LINE_MEMORY);
+    return (DbiRuntime) runtime;
 }
 
-static struct Statement *statement_next(struct Statement **program, int lineno)
+void dbi_runtime_free(DbiRuntime dbi)
 {
-    for (int i = lineno; i < MAX_PROG_SIZE; i++) {
-        struct Statement *stmt = program[i];
-        if (stmt) {
-            return stmt;
-        }
-    }
-    return NULL;
+    struct Runtime *runtime = (struct Runtime *) dbi;
+    objs_free(runtime->vars, MAX_VARS);
+    free(runtime->vars);
+    objs_free(runtime->ffi_argv, DBI_MAX_LINE_MEMORY);
+    free(runtime->ffi_argv);
+    free(runtime);
 }
 
 static void runtime_error(struct Statement *stmt, const char *fmt, ...)
@@ -1312,23 +1468,23 @@ static void runtime_error(struct Statement *stmt, const char *fmt, ...)
     printf("\n");
 }
 
-static void bobj_print(struct BObject *obj, struct BObject **vars, bool big_font)
+static void bobj_print(struct DbiObject *obj, struct DbiObject **vars, bool big_font)
 {
-    if (obj->type == BOB_VAR) {
+    if (obj->type == DBI_VAR) {
         obj = vars[obj->bvar];
     }
 #if FF_BIG
     if (big_font) {
         size_t len;
         char *strbuff;
-        if (obj->type == BOB_INT) {
+        if (obj->type == DBI_INT) {
             len = 3 * sizeof(int) + 2;
             strbuff = calloc(len, 1);
             snprintf(strbuff, len, "%d", obj->bint);
             print_big(strbuff);
             free(strbuff);
 
-        } else if (obj->type == BOB_STR) {
+        } else if (obj->type == DBI_STR) {
             len = strlen(obj->bstr) + 1;
             strbuff = calloc(len, 1);
             snprintf(strbuff, len, "%s", obj->bstr);
@@ -1342,9 +1498,9 @@ static void bobj_print(struct BObject *obj, struct BObject **vars, bool big_font
 #else
         (void) big_font; // Ignore parameter
 #endif
-        if (obj->type == BOB_INT) {
+        if (obj->type == DBI_INT) {
             printf("%d", obj->bint);
-        } else if (obj->type == BOB_STR) {
+        } else if (obj->type == DBI_STR) {
             printf("%s", obj->bstr);
         } else {
             runtime_error(NULL, "Internal runtime error: unknown type in PRINT statement");
@@ -1354,7 +1510,7 @@ static void bobj_print(struct BObject *obj, struct BObject **vars, bool big_font
     }
 }
 
-static void bobj_println(struct BObject *obj, struct BObject **vars, bool big_font)
+static void bobj_println(struct DbiObject *obj, struct DbiObject **vars, bool big_font)
 {
     bobj_print(obj, vars, big_font);
     printf("\n");
@@ -1364,19 +1520,19 @@ static void bobj_println(struct BObject *obj, struct BObject **vars, bool big_fo
 static struct Statement *execute_input(struct Statement *stmt, int var_count, uint8_t *var_list)
 {
     global_lineno = stmt->lineno;
-    char input_arr[MAX_LINE_LENGTH] = {0};
+    char input_arr[DBI_MAX_LINE_LENGTH] = {0};
     char *input = input_arr; // Decay to pointer, please
     char *init_input = input;
 
-    if (!fgets(input, MAX_LINE_LENGTH, stdin)) {
+    if (!fgets(input, DBI_MAX_LINE_LENGTH, stdin)) {
         compile_error("unexpected end of input");
         return NULL;
     }
 
-    uint8_t temp_bytecode_array[MAX_BYTECODE] = {0};
+    uint8_t temp_bytecode_array[DBI_MAX_BYTECODE] = {0};
     struct Bytecode temp_bytecode = { 0, temp_bytecode_array };
 
-    struct BObject *temp_memory_array[MAX_LINE_MEMORY] = {0};
+    struct DbiObject *temp_memory_array[DBI_MAX_LINE_MEMORY] = {0};
     struct Memory temp_memory = { 0, temp_memory_array };
 
     int current_var_count = 0;
@@ -1439,7 +1595,7 @@ static struct Statement *execute_input(struct Statement *stmt, int var_count, ui
 
 #define push_int(num) do {\
     stack_offset++;\
-    stack[stack_offset].type = BOB_INT;\
+    stack[stack_offset].type = DBI_INT;\
     stack[stack_offset].bint = num;\
 } while(0)
 
@@ -1453,22 +1609,22 @@ static struct Statement *execute_input(struct Statement *stmt, int var_count, ui
     callstack[callstack_offset--]
 
 #define expect_int(in) do {\
-    if (obj->type == BOB_VAR) {\
+    if (obj->type == DBI_VAR) {\
         obj = vars[obj->bvar];\
     }\
-    if (obj->type != BOB_INT) {\
+    if (obj->type != DBI_INT) {\
         runtime_error(stmt, "expected integer %s", in);\
-        return STATUS_ERROR;\
+        return DBI_STATUS_ERROR;\
     }\
 } while(0)
 
 #define expect_string(in) do {\
-    if (obj->type == BOB_VAR) {\
+    if (obj->type == DBI_VAR) {\
         obj = vars[obj->bvar];\
     }\
-    if (obj->type != BOB_STR) {\
+    if (obj->type != DBI_STR) {\
         runtime_error(stmt, "expected string %s", in);\
-        return STATUS_ERROR;\
+        return DBI_STATUS_ERROR;\
     }\
 } while(0)
 
@@ -1482,59 +1638,58 @@ static struct Statement *execute_input(struct Statement *stmt, int var_count, ui
     lnum = obj->bint;\
 } while(0)
 
-static enum Status execute_line(
+static enum DbiStatus execute_line(
+        struct Runtime *runtime,
         struct Statement *stmt,
-        struct BObject **vars,
-        struct Statement **program,
-        bool run_file,
-        // Out parameters
-        struct Statement **input_stmt_ptr,
-        char **filename_ptr,
-        bool *big_font_ptr)
+        struct Program *program,
+        bool run_file)
 {
-    enum Status status = STATUS_GOOD;
+    struct Statement **statements = program->statements;
+    struct DbiObject **vars = runtime->vars;
+    enum DbiStatus status = DBI_STATUS_GOOD;
 
     int stack_offset = 0;
-    struct BObject stack[MAX_STACK];
+    struct DbiObject stack[DBI_MAX_STACK];
 
     int callstack_offset = 0;
-    int callstack[MAX_CALL_STACK];
+    int callstack[DBI_MAX_CALL_STACK];
 
-    struct BObject *obj;
+    struct DbiObject *obj;
     int ip = 0;
 
     // Forward declarations since clang doesn't like these in switch
     int mem_loc, count;
     int lnum, rnum;
     int cmp;
+    int iter = 0;
 
     while (true) {
         uint8_t op = stmt->bytecode->array[ip];
 
 #if DEBUG
-    printf("stmt->array->index:%d\n", stmt->bytecode->index);
-    printf("stmt->memory->index:%d\n", stmt->memory->index);
+        printf("stmt->array->index:%d\n", stmt->bytecode->index);
+        printf("stmt->memory->index:%d\n", stmt->memory->index);
 
-    printf("mem {");
-    for (int i = 0; i < stmt->memory->index; i++) {
-        if (i != 0) printf(", ");
-        struct BObject *obj = stmt->memory->array[i];
-        if (obj->type == BOB_INT) {
-            printf("%d", obj->bint);
-        } else if (obj->type == BOB_STR) {
-            printf("%s", obj->bstr);
-        } else {
-            printf("%c", obj->bvar);
+        printf("mem {");
+        for (int i = 0; i < stmt->memory->index; i++) {
+            if (i != 0) printf(", ");
+            struct DbiObject *obj = stmt->memory->array[i];
+            if (obj->type == DBI_INT) {
+                printf("%d", obj->bint);
+            } else if (obj->type == DBI_STR) {
+                printf("%s", obj->bstr);
+            } else {
+                printf("%c", obj->bvar);
+            }
         }
-    }
-    printf("}\n");
+        printf("}\n");
 
-    printf("bytecode->array {");
-    for (int i = 0; i < stmt->bytecode->index; i++) {
-        if (i != 0) printf(", ");
-        printf("%d", stmt->bytecode->array[i]);
-    }
-    printf("}\n");
+        printf("bytecode->array {");
+        for (int i = 0; i < stmt->bytecode->index; i++) {
+            if (i != 0) printf(", ");
+            printf("%d", stmt->bytecode->array[i]);
+        }
+        printf("}\n");
 
 #endif
 
@@ -1542,48 +1697,53 @@ static enum Status execute_line(
         printf("op: %d\n", op);
 #endif
 
+        iter++;
+        if (iter == DBI_MAX_ITERATIONS) {
+            runtime_error(stmt, "probable infinite loop detected");
+            return DBI_STATUS_ERROR;
+        }
         switch (op) {
             case OP_NO:
                 break;
             case OP_PUSH:
                 mem_loc = stmt->bytecode->array[++ip];
-                if (stack_offset + 1 >= MAX_STACK) {
+                if (stack_offset + 1 >= DBI_MAX_STACK) {
                     runtime_error(stmt, "stack overflow");
-                    return STATUS_ERROR;
+                    return DBI_STATUS_ERROR;
                 }
                 push(stmt->memory->array[mem_loc]);
                 break;
             case OP_PRINT:
                 obj = pop();
-                bobj_print(obj, vars, *big_font_ptr);
+                bobj_print(obj, vars, runtime->big_font);
                 break;
             case OP_PRINTLN:
                 obj = pop();
-                bobj_println(obj, vars, *big_font_ptr);
+                bobj_println(obj, vars, runtime->big_font);
                 break;
             case OP_INPUT:
                 count = stmt->bytecode->array[++ip];
 
                 // Clear out old input, if it exists
-                if (*input_stmt_ptr != NULL) {
-                    statement_free(*input_stmt_ptr);
-                    *input_stmt_ptr = NULL;
+                if (runtime->input_stmt != NULL) {
+                    statement_free(runtime->input_stmt);
+                    runtime->input_stmt = NULL;
                 }
-                
+
                 // Get new input
-                *input_stmt_ptr = execute_input(stmt, count, stmt->bytecode->array + ip + 1);
-                if (*input_stmt_ptr == NULL) {
-                    return STATUS_ERROR;
+                runtime->input_stmt = execute_input(stmt, count, stmt->bytecode->array + ip + 1);
+                if (runtime->input_stmt == NULL) {
+                    return DBI_STATUS_ERROR;
                 }
 
                 // Execute compiled input
-                stmt = *input_stmt_ptr;
+                stmt = runtime->input_stmt;
                 ip = 0;
                 continue;
             case OP_LET:
                 obj = pop();
                 mem_loc = stmt->bytecode->array[++ip];
-                if (obj->type == BOB_VAR) {
+                if (obj->type == DBI_VAR) {
                     if (mem_loc != obj->bvar) {
                         bobj_copy(vars[mem_loc], vars[obj->bvar]);
                     }
@@ -1593,21 +1753,21 @@ static enum Status execute_line(
                 break;
             case OP_JMP:
                 obj = pop();
-                if (obj->type == BOB_VAR) {
+                if (obj->type == DBI_VAR) {
                     obj = vars[obj->bvar];
                 }
-                if (obj->type != BOB_INT) {
+                if (obj->type != DBI_INT) {
                     runtime_error(stmt, "cannot goto non-integer");
-                    return STATUS_ERROR;
-                } else if (obj->bint <= 0 || obj->bint >= MAX_PROG_SIZE) {
+                    return DBI_STATUS_ERROR;
+                } else if (obj->bint <= 0 || obj->bint >= DBI_MAX_PROG_SIZE) {
                     runtime_error(stmt, "goto %d out of bounds", obj->bint);
-                    return STATUS_ERROR;
-                } else if (program[obj->bint] == NULL) {
+                    return DBI_STATUS_ERROR;
+                } else if (statements[obj->bint] == NULL) {
                     runtime_error(stmt, "cannot goto %d, no such line", obj->bint);
-                    return STATUS_ERROR;
+                    return DBI_STATUS_ERROR;
                 }
                 ip = 0;
-                stmt = program[obj->bint];
+                stmt = statements[obj->bint];
                 continue;
             case OP_JNZ:
                 obj = pop();
@@ -1619,9 +1779,9 @@ static enum Status execute_line(
                 }
                 break;
             case OP_CALL:
-                if (callstack_offset + 1 >= MAX_CALL_STACK) {
+                if (callstack_offset + 1 >= DBI_MAX_CALL_STACK) {
                     runtime_error(stmt, "stack overflow");
-                    return STATUS_ERROR;
+                    return DBI_STATUS_ERROR;
                 }
                 obj = pop();
                 push_sub(obj->bint);
@@ -1629,49 +1789,49 @@ static enum Status execute_line(
             case OP_RETURN:
                 if (callstack_offset <=  0) {
                     // If we're not in a subroutine, this sends us back to the REPL
-                    return STATUS_GOOD;
+                    return DBI_STATUS_GOOD;
                 }
-                stmt = statement_next(program, pop_sub());
+                stmt = statement_next(statements, pop_sub());
                 if (stmt) {
                     ip = 0;
                     continue;
                 } 
-                return STATUS_GOOD;
+                return DBI_STATUS_GOOD;
             case OP_CLEAR:
                 if (stmt->lineno != 0) {
                     // If statement is self-destructing, just return to REPL
-                    program_clear(program);
-                    return STATUS_GOOD;
+                    program_clear(statements);
+                    return DBI_STATUS_GOOD;
                 } else {
-                    program_clear(program);
+                    program_clear(statements);
                 }
                 break;
             case OP_LIST:
-                program_list(program);
+                program_list(statements);
                 break;
             case OP_RUN:
-                stmt = statement_next(program, 0);
+                stmt = statement_next(statements, 0);
                 if (!stmt) {
-                    return STATUS_GOOD;
+                    return DBI_STATUS_GOOD;
                 }
                 ip = 0;
                 continue;
             case OP_END:
                 if (run_file || stmt->lineno == 0) {
-                    return STATUS_FINISHED;
+                    return DBI_STATUS_FINISHED;
                 }
-                return STATUS_GOOD;
+                return DBI_STATUS_GOOD;
             case OP_LOAD:
                 obj = pop();
                 expect_string("argument for LOAD command");
-                *filename_ptr = obj->bstr;
-                return STATUS_LOAD;
+                runtime->filename = obj->bstr;
+                return DBI_STATUS_LOAD;
             case OP_SAVE:
                 obj = pop();
                 expect_string("argument for SAVE command");
-                if (!program_save(program, obj->bstr)) {
+                if (!program_save(statements, obj->bstr)) {
                     runtime_error(stmt, "%s", strerror(errno));
-                    return STATUS_ERROR;
+                    return DBI_STATUS_ERROR;
                 }
                 break;
 #if FF_SLEEP
@@ -1683,7 +1843,7 @@ static enum Status execute_line(
 #endif
 #if FF_BIG
             case OP_BIG:
-                *big_font_ptr = !*big_font_ptr;
+                runtime->big_font = !runtime->big_font;
                 break;
 #endif
             case OP_SYSTEM:
@@ -1692,7 +1852,7 @@ static enum Status execute_line(
                 int err = system(obj->bstr);
                 if (err == -1) {
                     runtime_error(stmt, "%s", strerror(errno));
-                    return STATUS_ERROR;
+                    return DBI_STATUS_ERROR;
                 }
                 break;
             case OP_HELP:
@@ -1714,7 +1874,7 @@ static enum Status execute_line(
                 math_boilerplate();
                 if (rnum == 0) {
                     runtime_error(stmt, "division by zero");
-                    return STATUS_ERROR;
+                    return DBI_STATUS_ERROR;
                 }
                 push_int(lnum / rnum);
                 break;
@@ -1742,9 +1902,24 @@ static enum Status execute_line(
                 math_boilerplate();
                 push_int(lnum >= rnum);
                 break;
+            case OP_FFI_ARG:
+                assert(runtime->ffi_argc < DBI_MAX_LINE_MEMORY);
+                obj = pop();
+                bobj_copy(runtime->ffi_argv[runtime->ffi_argc], obj);
+                runtime->ffi_argc++;
+                break;
+            case OP_FFI_CALL:
+                obj = pop();
+                DbiForeignCall call = program->foreign_call_table[obj->bint];
+                status = call((DbiRuntime) runtime);
+                runtime->ffi_argc = 0;
+                if (status != DBI_STATUS_GOOD) {
+                    return status;
+                }
+                break;
             default:
                 runtime_error(stmt, "Internal error: unknown command encountered\n");
-                return STATUS_ERROR;
+                return DBI_STATUS_ERROR;
         }
         ip++;
         if (ip >= stmt->bytecode->index) {
@@ -1752,7 +1927,7 @@ static enum Status execute_line(
                 // If one-off command, exit
                 break;
             }
-            stmt = statement_next(program, stmt->lineno + 1);
+            stmt = statement_next(statements, stmt->lineno + 1);
             if (!stmt) {
                 break;
             }
@@ -1762,30 +1937,151 @@ static enum Status execute_line(
     return status;
 }
 
-static void vars_init(struct BObject **vars)
-{
-    for (int i = 0; i < MAX_VARS; i++) {
-        vars[i] = malloc(sizeof(**vars));
-        vars[i]->type = BOB_INT;
-        vars[i]->bint = 0;
-    }
-}
-
-static void vars_free(struct BObject **vars)
-{
-    for (int i = 0; i < MAX_VARS; i++) {
-        if (vars[i]->type == BOB_STR) {
-            free(vars[i]->bstr);
-        }
-        free(vars[i]);
-    }
-}
-
 // Loads provided file then executes RUN command
 // If filename is NULL it will drop into the REPL and not execute RUN
-//
-// Probably will split some of this up so that it can be used in a more library-ish way
-int dbi_run_file(char *input_file_name)
+// Returning false indicates to exit repl
+static bool repl(
+        char *input,
+        FILE **file_ptr,
+        struct Runtime *runtime,
+        struct Program *program,
+        bool run_file,
+        bool *input_error_ptr,
+        struct Bytecode *temp_bytecode,
+        struct Memory *temp_memory
+        )
+{
+    if (*file_ptr == stdin && !*input_error_ptr) {
+        printf("> ");
+    }
+
+    if (!fgets(input, DBI_MAX_LINE_LENGTH, *file_ptr)) {
+        if (*file_ptr == stdin) {
+            printf("\n");
+            return false;
+        } else {
+            fclose(*file_ptr);
+            *file_ptr = stdin;
+            if (run_file) {
+                strcpy(input, "RUN\n");
+            }
+        }
+    }
+
+    /* If user gives a line that exceeds length, ignore fgets input until we're parsed the
+     * whole line */
+    if (input[DBI_MAX_LINE_LENGTH - 2] != '\0') {
+        if (!*input_error_ptr) {
+            runtime_error(NULL, "input line too long");
+        }
+        *input_error_ptr = true;
+        return true;
+    } else if (*input_error_ptr) {
+        *input_error_ptr = false;
+        return true;
+    }
+
+    struct Statement *stmt = compile_line(input, program->foreign_calls, temp_memory, temp_bytecode);
+    if (!stmt) {
+        /* Error */
+        return true;
+    } else if (stmt->lineno == 0) {
+        /* No line number means we execute the command immediately */
+        enum DbiStatus status = execute_line(runtime, stmt, program, run_file);
+
+        /* Clear output parameters */
+        run_file = false;
+        if (runtime->input_stmt != NULL) {
+            statement_free(runtime->input_stmt);
+            runtime->input_stmt = NULL;
+        }
+
+        if (status == DBI_STATUS_FINISHED) {
+            statement_free(stmt);
+            return false;
+        } else if (status == DBI_STATUS_LOAD) {
+            if (*file_ptr != stdin) {
+                fclose(*file_ptr);
+            }
+            *file_ptr = fopen(runtime->filename, "r");
+            if (!*file_ptr) {
+                runtime_error(stmt, "%s", strerror(errno));
+                *file_ptr = stdin;
+            }
+        }
+        statement_free(stmt);
+    } else {
+        if (program->statements[stmt->lineno]) {
+            statement_free(program->statements[stmt->lineno]);
+        }
+        program->statements[stmt->lineno] = stmt;
+    }
+    return true;
+}
+
+// Returns true if there is more input to parse
+static bool compile_file(
+        char *input,
+        FILE **file_ptr,
+        struct Program *program,
+        // Out parameters
+        bool *input_error_ptr,
+        struct Bytecode *temp_bytecode,
+        struct Memory *temp_memory
+        )
+{
+    if (!fgets(input, DBI_MAX_LINE_LENGTH, *file_ptr)) {
+        fclose(*file_ptr);
+        return false;
+    }
+
+    /* If user gives a line that exceeds length, ignore fgets input until we're parsed the
+     * whole line */
+    if (input[DBI_MAX_LINE_LENGTH - 2] != '\0') {
+        if (!*input_error_ptr) {
+            runtime_error(NULL, "input line too long");
+        }
+        *input_error_ptr = true;
+        return true;
+    } else if (*input_error_ptr) {
+        *input_error_ptr = false;
+        return true;
+    }
+
+    struct Statement *stmt = compile_line(input, program->foreign_calls, temp_memory, temp_bytecode);
+    if (!stmt) {
+        /* Error */
+        return true;
+    } else if (stmt->lineno == 0) {
+        /* No line number is an error in compile mode */
+        compile_error("statement missing line number");
+        return true;
+    } else {
+        /* Replacing a line that already exists is an error in compile mode */
+        if (program->statements[stmt->lineno]) {
+            compile_error("overwriting existing line at %d", stmt->lineno);
+            return false;
+        }
+        program->statements[stmt->lineno] = stmt;
+    }
+    return true;
+}
+
+void temps_init(char *input, struct Memory *temp_memory, struct Bytecode *temp_bytecode)
+{
+    memset(input, 0, DBI_MAX_LINE_LENGTH);
+
+    temp_bytecode->index = 0;
+    memset(temp_bytecode->array, 0, DBI_MAX_BYTECODE);
+
+    temp_memory->index = 0;
+    memset(temp_memory->array, 0, sizeof(*temp_memory->array) * DBI_MAX_LINE_MEMORY);
+
+    global_lineno = -1;
+}
+
+// Boilerplate setup / cleanup for running, compiling, or just jumping into REPL
+static bool do_file(char *input_file_name, struct Program *program, bool immediate_mode)
 {
     bool run_file;
     FILE *file;
@@ -1795,7 +2091,7 @@ int dbi_run_file(char *input_file_name)
         run_file = true;
         if (!file) {
             runtime_error(NULL, "%s", strerror(errno));
-            return 1;
+            return false;
         }
     } else {
         file = stdin;
@@ -1803,112 +2099,145 @@ int dbi_run_file(char *input_file_name)
         print_intro();
     }
 
-    char *filename;
+    char input[DBI_MAX_LINE_LENGTH];
 
-    struct BObject *vars[MAX_VARS] = {0};
-    vars_init(vars);
-
-    char input[MAX_LINE_LENGTH];
-
-    uint8_t temp_bytecode_array[MAX_BYTECODE];
-    struct Bytecode temp_bytecode = { 0, temp_bytecode_array };
-
-    struct BObject *temp_memory_array[MAX_LINE_MEMORY];
+    struct DbiObject *temp_memory_array[DBI_MAX_LINE_MEMORY];
     struct Memory temp_memory = { 0, temp_memory_array };
 
-    struct Statement **program = calloc(MAX_PROG_SIZE, sizeof(*program));
+    uint8_t temp_bytecode_array[DBI_MAX_BYTECODE];
+    struct Bytecode temp_bytecode = { 0, temp_bytecode_array };
 
     bool input_error = false;
-    bool big_font = false;
 
-    /* Fake statement storing data from INPUT command */
-    struct Statement *input_stmt = NULL;
+    bool cont = true;
+    if (immediate_mode) {
+        DbiRuntime dbi = dbi_runtime_new();
+        struct Runtime *runtime = (struct Runtime *) dbi;
+        while (cont) {
+            temps_init(input, &temp_memory, &temp_bytecode);
+            cont = repl(input, &file, runtime, program, run_file, &input_error,
+                    &temp_bytecode, &temp_memory);
+        }
+        if (file != stdin) {
+            fclose(file);
+        }
+        dbi_runtime_free(dbi);
+    } else {
+        while (cont) {
+            temps_init(input, &temp_memory, &temp_bytecode);
+            cont = compile_file(input, &file, program, &input_error,
+                    &temp_bytecode, &temp_memory);
+        }
+    }
 
+    return true;
+}
+
+void foreign_call_table_init(struct Program *program)
+{
+    int count = 0;
+    struct ForeignCall *foreign_calls = program->foreign_calls;
+    while (foreign_calls != NULL) {
+        count++;
+        foreign_calls = foreign_calls->next;
+    }
+    if (count == 0) {
+        return;
+    }
+    program->foreign_call_table = calloc(count, sizeof(*program->foreign_call_table));
+    foreign_calls = program->foreign_calls;
+    for (int i = 0; i < count; i++) {
+        program->foreign_call_table[i] = foreign_calls->call;
+        foreign_calls = foreign_calls->next;
+    }
+}
+
+// Only compile - disallow non-numbered commands
+bool dbi_compile(DbiProgram prog, char *input_file_name)
+{
+    assert(prog);
+    assert(input_file_name);
+    struct Program *program = (struct Program *) prog;
+    assert(program->has_compiled == false);
+
+    foreign_call_table_init(program);
+    bool ret = do_file(input_file_name, program, false);
+
+    // We can just use foreign_table in the runtime
+    foreign_calls_free(program->foreign_calls);
+    program->foreign_calls = NULL;
+    program->has_compiled = true;
+    return ret;
+}
+
+void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int argc)
+{
+    assert(argc >= -1);
+    struct Program *program = (struct Program *) prog;
+    struct ForeignCall *fc = malloc(sizeof(*fc));
+    fc->argc = argc;
+    fc->name = name;
+    // Commands must be all caps, no other letters
+    while (*name != '\0') {
+        assert(*name >= 'A' && *name <= 'Z');
+        name++;
+    }
+    fc->call = call;
+    fc->next = NULL;
+    int count = 1;
+    if (program->foreign_calls == NULL) {
+        fc->extended_command_code = LAST_COMMAND + count;
+        program->foreign_calls = fc;
+        return;
+    }
+    struct ForeignCall *fc_temp = program->foreign_calls;
     while (true) {
-        memset(input, 0, MAX_LINE_LENGTH);
-
-        temp_bytecode.index = 0;
-        memset(temp_bytecode_array, 0, MAX_BYTECODE);
-
-        temp_memory.index = 0;
-        memset(temp_memory_array, 0, sizeof(*temp_memory_array) * MAX_LINE_MEMORY);
-
-        global_lineno = -1;
-
-        if (file == stdin && !input_error) {
-            printf("> ");
+        assert(strcmp(fc_temp->name, fc->name) != 0);
+        count++;
+        if (fc_temp->next == NULL) {
+            break;
         }
-
-        if (!fgets(input, MAX_LINE_LENGTH, file)) {
-            if (file == stdin) {
-                printf("\n");
-                break;
-            } else {
-                fclose(file);
-                file = stdin;
-                if (run_file) {
-                    strcpy(input, "RUN\n");
-                }
-            }
-        }
-
-        /* If user gives a line that exceeds length, ignore fgets input until we're parsed the
-         * whole line */
-        if (input[MAX_LINE_LENGTH - 2] != '\0') {
-            if (!input_error) {
-                runtime_error(NULL, "input line too long");
-            }
-            input_error = true;
-            continue;
-        } else if (input_error) {
-            input_error = false;
-            continue;
-        }
-
-        struct Statement *stmt = compile_line(input, &temp_memory, &temp_bytecode);
-        if (!stmt) {
-            /* Error */
-            continue;
-        } else if (stmt->lineno == 0) {
-            /* No line number means we execute the command immediately */
-            enum Status status = execute_line(stmt, vars, program, run_file,
-                    &input_stmt, &filename, &big_font);
-
-            /* Clear output parameters */
-            run_file = false;
-            if (input_stmt != NULL) {
-                statement_free(input_stmt);
-                input_stmt = NULL;
-            }
-
-            if (status == STATUS_FINISHED) {
-                statement_free(stmt);
-                break;
-            } else if (status == STATUS_LOAD) {
-                if (file != stdin) {
-                    fclose(file);
-                }
-                file = fopen(filename, "r");
-                if (!file) {
-                    runtime_error(stmt, "%s", strerror(errno));
-                    file = stdin;
-                }
-            }
-            statement_free(stmt);
-        } else {
-            if (program[stmt->lineno]) {
-                statement_free(program[stmt->lineno]);
-            }
-            program[stmt->lineno] = stmt;
-        }
+        fc_temp = program->foreign_calls->next;
     }
-    if (file != stdin) {
-        fclose(file);
-    }
+    fc->extended_command_code = DBI_END + count;
+    fc_temp->next = fc;
+}
 
-    vars_free(vars);
-    program_clear(program);
-    free(program);
-    return 0;
+// Executes program in runtime
+enum DbiStatus dbi_run(DbiRuntime dbi, DbiProgram prog)
+{
+    struct Runtime *runtime = (struct Runtime *) dbi;
+    struct Program *program = (struct Program *) prog;
+    struct Statement *stmt = statement_next(program->statements, 0);
+    enum DbiStatus status = execute_line(runtime, stmt, program, true);
+    return status;
+}
+
+int dbi_get_argc(DbiRuntime dbi)
+{
+    struct Runtime *runtime = (struct Runtime *) dbi;
+    return runtime->ffi_argc;
+}
+
+struct DbiObject **dbi_get_argv(DbiRuntime dbi)
+{
+    struct Runtime *runtime = (struct Runtime *) dbi;
+    return runtime->ffi_argv;
+}
+
+// Context can be used to pass data between C and dbi in foreign calls
+void dbi_register_context(DbiRuntime dbi, void *context);
+void *dbi_get_context(DbiRuntime dbi);
+
+// Return object associated with var
+struct DbiObject *dbi_get_var(DbiRuntime dbi, char var);
+
+// Run a file / enter REPL
+bool dbi_repl(char *input_file_name)
+{
+    DbiProgram prog = dbi_program_new();
+    bool ret = do_file(input_file_name, (struct Program *) prog, true);
+    dbi_program_free(prog);
+    return ret;
 }
 

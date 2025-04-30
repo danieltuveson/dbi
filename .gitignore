@@ -1,4 +1,5 @@
 dbi
+example
 *.o
 *.a
 *.swp
