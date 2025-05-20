@@ -1,4 +1,4 @@
-CFLAGS = -O2 -g -Wall -Wextra
+CFLAGS = -O2 -g -Wall -Wextra -fPIC
 objects = dbi.o
 
 dbi: $(objects) cli.o
@@ -17,6 +17,7 @@ install: dbi libdbi.a
 
 uninstall:
 	@sudo rm -f /usr/local/lib/libdbi.a
+	@sudo rm -f /usr/local/lib/libdbi.so
 	@sudo rm -f /usr/local/bin/dbi
 	@sudo rm -f /usr/local/include/dbi.h
 
@@ -28,6 +29,6 @@ test: dbi
 	@./dbi tests/test.bas
 
 clean:
-	rm -f dbi *.o *.a
+	rm -f dbi *.o *.a *.so
 	rm -rf *.dSYM
 

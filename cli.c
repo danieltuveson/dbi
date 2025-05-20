@@ -16,9 +16,27 @@ int main(int argc, char *argv[])
     } else if (argc == 3) {
         if (strcmp(argv[1], "-c") == 0) {
             DbiProgram prog = dbi_program_new();
-            bool ret = dbi_compile(prog, argv[2]);
+            if (!dbi_compile_file(prog, argv[2])) {
+                printf("%s", dbi_strerror());
+                return 1;
+            }
             dbi_program_free(prog);
-            return !ret;
+            return 0;
+        } else if (strcmp(argv[1], "-e") == 0) {
+            DbiProgram prog = dbi_program_new();
+            if (!dbi_compile_string(prog, argv[2])) {
+                printf("%s", dbi_strerror());
+                return 1;
+            }
+            DbiRuntime dbi = dbi_runtime_new();
+            if (!dbi_run(dbi, prog)) {
+                printf("%s", dbi_strerror());
+                dbi_program_free(prog);
+                return 1;
+            }
+            dbi_runtime_free(dbi);
+            dbi_program_free(prog);
+            return 0;
         } else if (strcmp(argv[1], "-r") == 0) {
             return !dbi_repl(argv[2]);
         } else {

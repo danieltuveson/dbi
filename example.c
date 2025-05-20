@@ -8,7 +8,9 @@
 
 enum DbiStatus hello(DbiRuntime dbi)
 {
-    printf("Hello!\n");
+    char **context = dbi_get_context(dbi);
+    printf("%s i: %d!\n", *context, dbi_get_var(dbi, 'a')->bint);
+    *context = "hello from the old context!";
     return DBI_STATUS_GOOD;
 }
 
@@ -31,16 +33,22 @@ int main(int argc, char *argv[])
     dbi_register_command(prog, "HELLOFFI", hello, 0);
     dbi_register_command(prog, "SLEEPFFI", ffi_sleep, 1);
 
-    bool ret = dbi_compile(prog, argv[1]);
+    bool ret = dbi_compile_file(prog, argv[1]);
     if (!ret) {
+        printf("%s", dbi_strerror());
         dbi_program_free(prog);
         return 0;
     }
 
+    struct DbiObject bob = { DBI_INT, { .bint = 123 } };
+    char *context = "hello from context!";
     for (int i = 0; i < 2; i++) {
         DbiRuntime dbi = dbi_runtime_new();
+        dbi_set_context(dbi, &context);
+        bob.bint = i;
+        dbi_set_var(dbi, 'a', &bob);
         if (!dbi_run(dbi, prog)) {
-            printf("bad\n");
+            printf("%s", dbi_strerror());
         }
         dbi_runtime_free(dbi);
     }

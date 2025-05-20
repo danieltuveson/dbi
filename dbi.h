@@ -9,15 +9,14 @@
 
 // Should be set to *at least* whatever longest command name is (+1 character for null byte)
 #define DBI_MAX_COMMAND_NAME 32 
-#include <limits.h>
 
 // Arbitrary - adjust as needed
 #define DBI_MAX_LINE_LENGTH 256 // Max number of chars that can be parsed in one line
 #define DBI_MAX_STACK 128       // Max number of arithmatic expressions that can be on the stack
 #define DBI_MAX_CALL_STACK 16   // Max depth of call stack (GOSUB's / RETURN)
-#define DBI_MAX_LINE_MEMORY 64  /* Max number of variables, numbers, or strings in one line
-                                 * NOTE: this should never be set to more than 256 since it will get
-                                 *       used as a uint8_t */
+#define DBI_MAX_LINE_MEMORY 64  // Max number of variables, numbers, or strings in one line
+                                // NOTE: this should never be set to more than 256 since it will get
+                                //       used as a uint8_t
 #define DBI_MAX_BYTECODE 64
 #define DBI_MAX_ITERATIONS 999999 // Maximum number of iterations of VM loop before aborting
 
@@ -76,7 +75,8 @@ void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int 
 
 // You may only call dbi_compile once per program
 // All foreign commands must be registered before compilation
-bool dbi_compile(DbiProgram prog, char *input_file_name);
+bool dbi_compile_file(DbiProgram prog, char *input_file_name);
+bool dbi_compile_string(DbiProgram prog, char *text);
 DbiProgram dbi_program_new(void);
 void dbi_program_free(DbiProgram prog);
 
@@ -85,16 +85,20 @@ enum DbiStatus dbi_run(DbiRuntime dbi, DbiProgram prog);
 DbiRuntime dbi_runtime_new(void);
 void dbi_runtime_free(DbiRuntime dbi);
 
-// Context can be used to pass data between C and dbi in foreign calls
-void dbi_register_context(DbiRuntime dbi, void *context);
+// Get compilation / runtime errors as a string
+char *dbi_strerror(void);
 
-// Helper functions to be called from foreign call
+// Context can be used to pass data between C and dbi in foreign calls
+void dbi_set_context(DbiRuntime dbi, void *context);
 void *dbi_get_context(DbiRuntime dbi);
+
+// Get number of arguments + list of arguments from calling foreign command
 int dbi_get_argc(DbiRuntime dbi);
 struct DbiObject **dbi_get_argv(DbiRuntime dbi);
 
-// Return object associated with var
+// Get object associated with var (which can be any letter a - z)
 struct DbiObject *dbi_get_var(DbiRuntime dbi, char var);
+void dbi_set_var(DbiRuntime dbi, char var, struct DbiObject *obj);
 
 // If you just want to interactively run a BASIC script, use this (NULL just drops you into repl)
 bool dbi_repl(char *input_file_name);

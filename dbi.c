@@ -27,18 +27,42 @@
 // This is the only mutable global variable. It is just used for making error messages nice.
 static int global_lineno = 0;
 
+// I lied, this is also a mutable global
+#define MAX_ERROR 512
+static char global_err_msg[MAX_ERROR] = {0};
+
 static void compile_error(const char *fmt, ...)
 {
+    int len = strlen(global_err_msg);
     if (global_lineno <= 0) {
-        printf("Error: ");
+        len += snprintf(global_err_msg + len, MAX_ERROR - len, "Error: ");
     } else {
-        printf("Error at line %d: ", global_lineno);
+        len += snprintf(global_err_msg + len, MAX_ERROR - len, "Error at line %d: ", global_lineno);
     }
     va_list args;
     va_start(args, fmt);
-    vprintf(fmt, args);
+    len += vsnprintf(global_err_msg + len, MAX_ERROR - len, fmt, args);
     va_end(args);
-    printf("\n");
+    snprintf(global_err_msg + len, MAX_ERROR - len, "\n");
+    if (MAX_ERROR - len <= 0) {
+        char *too_many_errors = "...\n(too many errors to display)\n";
+        len = MAX_ERROR - strlen(too_many_errors) - 1;
+        snprintf(global_err_msg + len, MAX_ERROR - len, too_many_errors);
+    }
+#if DBI_DEBUG
+    printf("%s", global_err_msg);
+#endif
+}
+
+static void print_errors(void)
+{
+    printf("%s", global_err_msg);
+    memset(global_err_msg, 0, MAX_ERROR);
+}
+
+char *dbi_strerror(void)
+{
+    return global_err_msg;
 }
 
 // *******************************************************************
@@ -471,9 +495,8 @@ struct Program {
 DbiProgram dbi_program_new(void)
 {
     struct Program *program = malloc(sizeof(*program));
+    memset(program, 0, sizeof(*program));
     program->statements = calloc(DBI_MAX_PROG_SIZE, sizeof(*program->statements));
-    program->has_compiled = false;
-    program->foreign_calls = NULL;
     return (DbiProgram) program;
 }
 
@@ -491,7 +514,9 @@ void dbi_program_free(DbiProgram prog)
     assert(prog != 0);
     struct Program *program = (struct Program *) prog;
     program_clear(program->statements);
-    free(program->foreign_call_table);
+    if (program->foreign_call_table) {
+        free(program->foreign_call_table);
+    }
     free(program->statements);
     free(program);
 }
@@ -719,13 +744,7 @@ static bool push_op(char *stack, int *op_stack_offset, char op)
         compile_error("large expression exhausted operator stack");
         return false;
     }
-#if DEBUG
-    printf("calling push op with '%c',", op);
-#endif
     *op_stack_offset = *op_stack_offset + 1;
-#if DEBUG
-    printf("stack offset of '%d'\n", *op_stack_offset);
-#endif
     stack[*op_stack_offset] = op;
     return true;
 }
@@ -749,9 +768,6 @@ static void compile_op(struct Bytecode *bytecode, char op)
     } else if (op == '-') {
         bytecode_add(bytecode, OP_SUB);
     } else {
-#if DEBUG
-        printf("op: %c\n", op);
-#endif
         assert(0);
     }
 }
@@ -941,6 +957,7 @@ static int compile_print_like(char *input, struct Memory *memory, struct Bytecod
     } while (true);
     if (num_args != -1 && arg_count != num_args) {
         compile_error("expected %d arguments but got %d", num_args, arg_count);
+        return 0;
     }
 
     return input - init_input;
@@ -950,7 +967,9 @@ static int compile_print(char *input, struct Memory *memory, struct Bytecode *by
 {
     int char_count = compile_print_like(input, memory, bytecode, OP_PRINT, -1);
     // Kind of hacky, but whatever
-    bytecode->array[bytecode->index - 1] = OP_PRINTLN;
+    if (char_count) {
+        bytecode->array[bytecode->index - 1] = OP_PRINTLN;
+    }
     return char_count;
 }
 
@@ -1448,25 +1467,22 @@ void dbi_runtime_free(DbiRuntime dbi)
 {
     struct Runtime *runtime = (struct Runtime *) dbi;
     objs_free(runtime->vars, MAX_VARS);
+    if (runtime->input_stmt) {
+        statement_free(runtime->input_stmt);
+        runtime->input_stmt = NULL;
+    }
     free(runtime->vars);
     objs_free(runtime->ffi_argv, DBI_MAX_LINE_MEMORY);
     free(runtime->ffi_argv);
     free(runtime);
 }
 
-static void runtime_error(struct Statement *stmt, const char *fmt, ...)
-{
-    if (stmt == NULL || stmt->lineno == 0) {
-        printf("Error: ");
-    } else {
-        printf("Error at line %d: ", stmt->lineno);
-    }
-    va_list args;
-    va_start(args, fmt);
-    vprintf(fmt, args);
-    va_end(args);
-    printf("\n");
-}
+#define runtime_error(lineno, ...) do {\
+    int old_lineno = global_lineno;\
+    global_lineno = lineno;\
+    compile_error(__VA_ARGS__);\
+    global_lineno = old_lineno;\
+} while (0)
 
 static void bobj_print(struct DbiObject *obj, struct DbiObject **vars, bool big_font)
 {
@@ -1492,7 +1508,7 @@ static void bobj_print(struct DbiObject *obj, struct DbiObject **vars, bool big_
             free(strbuff);
 
         } else {
-            runtime_error(NULL, "Internal runtime error: unknown type in PRINT statement");
+            runtime_error(-1, "Internal runtime error: unknown type in PRINT statement");
         }
     } else {
 #else
@@ -1503,7 +1519,7 @@ static void bobj_print(struct DbiObject *obj, struct DbiObject **vars, bool big_
         } else if (obj->type == DBI_STR) {
             printf("%s", obj->bstr);
         } else {
-            runtime_error(NULL, "Internal runtime error: unknown type in PRINT statement");
+            runtime_error(-1, "Internal runtime error: unknown type in PRINT statement");
 #if FF_BIG
         }
 #endif
@@ -1613,7 +1629,7 @@ static struct Statement *execute_input(struct Statement *stmt, int var_count, ui
         obj = vars[obj->bvar];\
     }\
     if (obj->type != DBI_INT) {\
-        runtime_error(stmt, "expected integer %s", in);\
+        runtime_error(stmt->lineno, "expected integer %s", in);\
         return DBI_STATUS_ERROR;\
     }\
 } while(0)
@@ -1623,7 +1639,7 @@ static struct Statement *execute_input(struct Statement *stmt, int var_count, ui
         obj = vars[obj->bvar];\
     }\
     if (obj->type != DBI_STR) {\
-        runtime_error(stmt, "expected string %s", in);\
+        runtime_error(stmt->lineno, "expected string %s", in);\
         return DBI_STATUS_ERROR;\
     }\
 } while(0)
@@ -1666,7 +1682,7 @@ static enum DbiStatus execute_line(
     while (true) {
         uint8_t op = stmt->bytecode->array[ip];
 
-#if DEBUG
+#if DBI_DEBUG
         printf("stmt->array->index:%d\n", stmt->bytecode->index);
         printf("stmt->memory->index:%d\n", stmt->memory->index);
 
@@ -1693,13 +1709,13 @@ static enum DbiStatus execute_line(
 
 #endif
 
-#if DEBUG
+#if DBI_DEBUG
         printf("op: %d\n", op);
 #endif
 
         iter++;
         if (iter == DBI_MAX_ITERATIONS) {
-            runtime_error(stmt, "probable infinite loop detected");
+            runtime_error(stmt->lineno, "probable infinite loop detected");
             return DBI_STATUS_ERROR;
         }
         switch (op) {
@@ -1708,7 +1724,7 @@ static enum DbiStatus execute_line(
             case OP_PUSH:
                 mem_loc = stmt->bytecode->array[++ip];
                 if (stack_offset + 1 >= DBI_MAX_STACK) {
-                    runtime_error(stmt, "stack overflow");
+                    runtime_error(stmt->lineno, "stack overflow");
                     return DBI_STATUS_ERROR;
                 }
                 push(stmt->memory->array[mem_loc]);
@@ -1757,13 +1773,13 @@ static enum DbiStatus execute_line(
                     obj = vars[obj->bvar];
                 }
                 if (obj->type != DBI_INT) {
-                    runtime_error(stmt, "cannot goto non-integer");
+                    runtime_error(stmt->lineno, "cannot goto non-integer");
                     return DBI_STATUS_ERROR;
                 } else if (obj->bint <= 0 || obj->bint >= DBI_MAX_PROG_SIZE) {
-                    runtime_error(stmt, "goto %d out of bounds", obj->bint);
+                    runtime_error(stmt->lineno, "goto %d out of bounds", obj->bint);
                     return DBI_STATUS_ERROR;
                 } else if (statements[obj->bint] == NULL) {
-                    runtime_error(stmt, "cannot goto %d, no such line", obj->bint);
+                    runtime_error(stmt->lineno, "cannot goto %d, no such line", obj->bint);
                     return DBI_STATUS_ERROR;
                 }
                 ip = 0;
@@ -1780,7 +1796,7 @@ static enum DbiStatus execute_line(
                 break;
             case OP_CALL:
                 if (callstack_offset + 1 >= DBI_MAX_CALL_STACK) {
-                    runtime_error(stmt, "stack overflow");
+                    runtime_error(stmt->lineno, "stack overflow");
                     return DBI_STATUS_ERROR;
                 }
                 obj = pop();
@@ -1830,7 +1846,7 @@ static enum DbiStatus execute_line(
                 obj = pop();
                 expect_string("argument for SAVE command");
                 if (!program_save(statements, obj->bstr)) {
-                    runtime_error(stmt, "%s", strerror(errno));
+                    runtime_error(stmt->lineno, "%s", strerror(errno));
                     return DBI_STATUS_ERROR;
                 }
                 break;
@@ -1851,7 +1867,7 @@ static enum DbiStatus execute_line(
                 expect_string("argument for SYSTEM command");
                 int err = system(obj->bstr);
                 if (err == -1) {
-                    runtime_error(stmt, "%s", strerror(errno));
+                    runtime_error(stmt->lineno, "%s", strerror(errno));
                     return DBI_STATUS_ERROR;
                 }
                 break;
@@ -1873,7 +1889,7 @@ static enum DbiStatus execute_line(
             case OP_DIV:
                 math_boilerplate();
                 if (rnum == 0) {
-                    runtime_error(stmt, "division by zero");
+                    runtime_error(stmt->lineno, "division by zero");
                     return DBI_STATUS_ERROR;
                 }
                 push_int(lnum / rnum);
@@ -1918,7 +1934,7 @@ static enum DbiStatus execute_line(
                 }
                 break;
             default:
-                runtime_error(stmt, "Internal error: unknown command encountered\n");
+                runtime_error(stmt->lineno, "Internal error: unknown command encountered\n");
                 return DBI_STATUS_ERROR;
         }
         ip++;
@@ -1937,151 +1953,22 @@ static enum DbiStatus execute_line(
     return status;
 }
 
-// Loads provided file then executes RUN command
-// If filename is NULL it will drop into the REPL and not execute RUN
-// Returning false indicates to exit repl
-static bool repl(
-        char *input,
-        FILE **file_ptr,
-        struct Runtime *runtime,
-        struct Program *program,
-        bool run_file,
-        bool *input_error_ptr,
-        struct Bytecode *temp_bytecode,
-        struct Memory *temp_memory
-        )
-{
-    if (*file_ptr == stdin && !*input_error_ptr) {
-        printf("> ");
-    }
-
-    if (!fgets(input, DBI_MAX_LINE_LENGTH, *file_ptr)) {
-        if (*file_ptr == stdin) {
-            printf("\n");
-            return false;
-        } else {
-            fclose(*file_ptr);
-            *file_ptr = stdin;
-            if (run_file) {
-                strcpy(input, "RUN\n");
-            }
-        }
-    }
-
-    /* If user gives a line that exceeds length, ignore fgets input until we're parsed the
-     * whole line */
-    if (input[DBI_MAX_LINE_LENGTH - 2] != '\0') {
-        if (!*input_error_ptr) {
-            runtime_error(NULL, "input line too long");
-        }
-        *input_error_ptr = true;
-        return true;
-    } else if (*input_error_ptr) {
-        *input_error_ptr = false;
-        return true;
-    }
-
-    struct Statement *stmt = compile_line(input, program->foreign_calls, temp_memory, temp_bytecode);
-    if (!stmt) {
-        /* Error */
-        return true;
-    } else if (stmt->lineno == 0) {
-        /* No line number means we execute the command immediately */
-        enum DbiStatus status = execute_line(runtime, stmt, program, run_file);
-
-        /* Clear output parameters */
-        run_file = false;
-        if (runtime->input_stmt != NULL) {
-            statement_free(runtime->input_stmt);
-            runtime->input_stmt = NULL;
-        }
-
-        if (status == DBI_STATUS_FINISHED) {
-            statement_free(stmt);
-            return false;
-        } else if (status == DBI_STATUS_LOAD) {
-            if (*file_ptr != stdin) {
-                fclose(*file_ptr);
-            }
-            *file_ptr = fopen(runtime->filename, "r");
-            if (!*file_ptr) {
-                runtime_error(stmt, "%s", strerror(errno));
-                *file_ptr = stdin;
-            }
-        }
-        statement_free(stmt);
-    } else {
-        if (program->statements[stmt->lineno]) {
-            statement_free(program->statements[stmt->lineno]);
-        }
-        program->statements[stmt->lineno] = stmt;
-    }
-    return true;
-}
-
-// Returns true if there is more input to parse
-static bool compile_file(
-        char *input,
-        FILE **file_ptr,
-        struct Program *program,
-        // Out parameters
-        bool *input_error_ptr,
-        struct Bytecode *temp_bytecode,
-        struct Memory *temp_memory
-        )
-{
-    if (!fgets(input, DBI_MAX_LINE_LENGTH, *file_ptr)) {
-        fclose(*file_ptr);
-        return false;
-    }
-
-    /* If user gives a line that exceeds length, ignore fgets input until we're parsed the
-     * whole line */
-    if (input[DBI_MAX_LINE_LENGTH - 2] != '\0') {
-        if (!*input_error_ptr) {
-            runtime_error(NULL, "input line too long");
-        }
-        *input_error_ptr = true;
-        return true;
-    } else if (*input_error_ptr) {
-        *input_error_ptr = false;
-        return true;
-    }
-
-    struct Statement *stmt = compile_line(input, program->foreign_calls, temp_memory, temp_bytecode);
-    if (!stmt) {
-        /* Error */
-        return true;
-    } else if (stmt->lineno == 0) {
-        /* No line number is an error in compile mode */
-        compile_error("statement missing line number");
-        return true;
-    } else {
-        /* Replacing a line that already exists is an error in compile mode */
-        if (program->statements[stmt->lineno]) {
-            compile_error("overwriting existing line at %d", stmt->lineno);
-            return false;
-        }
-        program->statements[stmt->lineno] = stmt;
-    }
-    return true;
-}
-
 void temps_init(char *input, struct Memory *temp_memory, struct Bytecode *temp_bytecode)
 {
     memset(input, 0, DBI_MAX_LINE_LENGTH);
 
-    temp_bytecode->index = 0;
-    memset(temp_bytecode->array, 0, DBI_MAX_BYTECODE);
-
     temp_memory->index = 0;
     memset(temp_memory->array, 0, sizeof(*temp_memory->array) * DBI_MAX_LINE_MEMORY);
+
+    temp_bytecode->index = 0;
+    memset(temp_bytecode->array, 0, DBI_MAX_BYTECODE);
 
     global_lineno = -1;
 }
 
-// Boilerplate setup / cleanup for running, compiling, or just jumping into REPL
-static bool do_file(char *input_file_name, struct Program *program, bool immediate_mode)
+// Loads provided file then executes RUN command
+// If filename is NULL it will drop into the REPL and not execute RUN
+static bool repl(char *input_file_name, struct Program *program)
 {
     bool run_file;
     FILE *file;
@@ -2090,7 +1977,7 @@ static bool do_file(char *input_file_name, struct Program *program, bool immedia
         file = fopen(input_file_name, "r");
         run_file = true;
         if (!file) {
-            runtime_error(NULL, "%s", strerror(errno));
+            runtime_error(-1, "%s", strerror(errno));
             return false;
         }
     } else {
@@ -2109,28 +1996,194 @@ static bool do_file(char *input_file_name, struct Program *program, bool immedia
 
     bool input_error = false;
 
-    bool cont = true;
-    if (immediate_mode) {
-        DbiRuntime dbi = dbi_runtime_new();
-        struct Runtime *runtime = (struct Runtime *) dbi;
-        while (cont) {
-            temps_init(input, &temp_memory, &temp_bytecode);
-            cont = repl(input, &file, runtime, program, run_file, &input_error,
-                    &temp_bytecode, &temp_memory);
+    DbiRuntime dbi = dbi_runtime_new();
+    struct Runtime *runtime = (struct Runtime *) dbi;
+
+    while (true) {
+        temps_init(input, &temp_memory, &temp_bytecode);
+        if (file == stdin && !input_error) {
+            printf("> ");
         }
-        if (file != stdin) {
-            fclose(file);
+
+        if (!fgets(input, DBI_MAX_LINE_LENGTH, file)) {
+            if (file == stdin) {
+                printf("\n");
+                break;
+            } else {
+                fclose(file);
+                file = stdin;
+                if (run_file) {
+                    strcpy(input, "RUN\n");
+                }
+            }
         }
-        dbi_runtime_free(dbi);
-    } else {
-        while (cont) {
-            temps_init(input, &temp_memory, &temp_bytecode);
-            cont = compile_file(input, &file, program, &input_error,
-                    &temp_bytecode, &temp_memory);
+
+        /* If user gives a line that exceeds length, ignore fgets input until we're parsed the
+         * whole line */
+        if (input[DBI_MAX_LINE_LENGTH - 2] != '\0') {
+            if (!input_error) {
+                runtime_error(-1, "input line too long");
+            }
+            input_error = true;
+            print_errors();
+            continue;
+        } else if (input_error) {
+            input_error = false;
+            print_errors();
+            continue;
+        }
+
+        struct Statement *stmt = compile_line(input, program->foreign_calls,
+                &temp_memory, &temp_bytecode);
+        if (!stmt) {
+            /* Error */
+            print_errors();
+            continue;
+        } else if (stmt->lineno == 0) {
+            /* No line number means we execute the command immediately */
+            enum DbiStatus status = execute_line(runtime, stmt, program, run_file);
+
+            /* Clear output parameters */
+            run_file = false;
+            if (runtime->input_stmt != NULL) {
+                statement_free(runtime->input_stmt);
+                runtime->input_stmt = NULL;
+            }
+
+            if (status == DBI_STATUS_FINISHED) {
+                statement_free(stmt);
+                break;
+            } else if (status == DBI_STATUS_LOAD) {
+                if (file != stdin) {
+                    fclose(file);
+                }
+                file = fopen(runtime->filename, "r");
+                if (!file) {
+                    runtime_error(stmt->lineno, "%s", strerror(errno));
+                    file = stdin;
+                }
+            } else if (status == DBI_STATUS_ERROR) {
+                print_errors();
+            }
+            statement_free(stmt);
+        } else {
+            if (program->statements[stmt->lineno]) {
+                statement_free(program->statements[stmt->lineno]);
+            }
+            program->statements[stmt->lineno] = stmt;
         }
     }
+    if (file != stdin) {
+        fclose(file);
+    }
+    dbi_runtime_free(dbi);
+    return global_err_msg[0] == '\0';
+}
 
+struct Code {
+    bool isfile; // 1 = file, 0 = text
+    union {
+        FILE *file;
+        char *text;
+    };
+};
+
+static bool code_init_file(struct Code *code, char *input_file_name)
+{
+    code->isfile = true;
+    code->file = fopen(input_file_name, "r");
+    if (!code->file) {
+        runtime_error(-1, "%s", strerror(errno));
+        return false;
+    }
     return true;
+}
+
+static void code_init_text(struct Code *code, char *text)
+{
+    code->isfile = false;
+    code->text = text;
+}
+
+static void code_free(struct Code *code)
+{
+    if (code->isfile) {
+        fclose(code->file);
+        code->file = NULL;
+    }
+}
+
+// fgets replacement for not-file inputs
+char *cgets(char s[DBI_MAX_LINE_LENGTH], int size, struct Code *code)
+{
+    if (code->isfile) {
+        return fgets(s, size, code->file);
+    } else {
+        ignore_whitespace(&code->text);
+        if (*code->text == '\0') {
+            return NULL;
+        }
+        int i = 0;
+        for (i = 0; *code->text != '\0' && *code->text != '\n'; i++) {
+            if (i == DBI_MAX_LINE_LENGTH - 1) {
+                return NULL;
+            }
+            s[i] = *code->text;
+            code->text++;
+        }
+        return s;
+    }
+}
+
+// Boilerplate setup / cleanup for running, compiling, or just jumping into REPL
+static bool compile(struct Code *code, struct Program *program)
+{
+    char input[DBI_MAX_LINE_LENGTH];
+
+    struct DbiObject *temp_memory_array[DBI_MAX_LINE_MEMORY];
+    struct Memory temp_memory = { 0, temp_memory_array };
+
+    uint8_t temp_bytecode_array[DBI_MAX_BYTECODE];
+    struct Bytecode temp_bytecode = { 0, temp_bytecode_array };
+
+    bool input_error = false;
+
+    while (true) {
+        temps_init(input, &temp_memory, &temp_bytecode);
+        if (!cgets(input, DBI_MAX_LINE_LENGTH, code)) {
+            break;
+        }
+
+        /* If user gives a line that exceeds length, ignore fgets input until we're parsed the
+         * whole line */
+        if (input[DBI_MAX_LINE_LENGTH - 2] != '\0') {
+            if (!input_error) {
+                runtime_error(-1, "input line too long");
+            }
+            input_error = true;
+            continue;
+        } else if (input_error) {
+            input_error = false;
+            continue;
+        }
+
+        struct Statement *stmt = compile_line(input, program->foreign_calls,
+                &temp_memory, &temp_bytecode);
+        if (!stmt) {
+            /* Error */
+        } else if (stmt->lineno == 0) {
+            /* No line number is an error in compile mode */
+            compile_error("statement missing line number");
+        } else {
+            /* Replacing a line that already exists is an error in compile mode */
+            if (program->statements[stmt->lineno]) {
+                compile_error("overwriting existing line at %d", stmt->lineno);
+            } else {
+                program->statements[stmt->lineno] = stmt;
+            }
+        }
+    }
+    return global_err_msg[0] == '\0';
 }
 
 void foreign_call_table_init(struct Program *program)
@@ -2152,21 +2205,44 @@ void foreign_call_table_init(struct Program *program)
     }
 }
 
-// Only compile - disallow non-numbered commands
-bool dbi_compile(DbiProgram prog, char *input_file_name)
+bool compile_code(DbiProgram prog, struct Code *code)
 {
-    assert(prog);
-    assert(input_file_name);
+    if (!prog) {
+        compile_error("empty program");
+        return false;
+    }
+    memset(global_err_msg, 0, MAX_ERROR);
     struct Program *program = (struct Program *) prog;
     assert(program->has_compiled == false);
 
     foreign_call_table_init(program);
-    bool ret = do_file(input_file_name, program, false);
+    bool ret = compile(code, program);
 
     // We can just use foreign_table in the runtime
     foreign_calls_free(program->foreign_calls);
     program->foreign_calls = NULL;
     program->has_compiled = true;
+    return ret;
+}
+
+// Only compile - disallow non-numbered commands
+bool dbi_compile_file(DbiProgram prog, char *input_file_name)
+{
+    struct Code code;
+    if (!code_init_file(&code, input_file_name)) {
+        return false;
+    }
+    bool ret = compile_code(prog, &code);
+    code_free(&code);
+    return ret;
+}
+
+bool dbi_compile_string(DbiProgram prog, char *text)
+{
+    struct Code code;
+    code_init_text(&code, text);
+    bool ret = compile_code(prog, &code);
+    code_free(&code);
     return ret;
 }
 
@@ -2206,6 +2282,7 @@ void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int 
 // Executes program in runtime
 enum DbiStatus dbi_run(DbiRuntime dbi, DbiProgram prog)
 {
+    memset(global_err_msg, 0, MAX_ERROR);
     struct Runtime *runtime = (struct Runtime *) dbi;
     struct Program *program = (struct Program *) prog;
     struct Statement *stmt = statement_next(program->statements, 0);
@@ -2226,17 +2303,40 @@ struct DbiObject **dbi_get_argv(DbiRuntime dbi)
 }
 
 // Context can be used to pass data between C and dbi in foreign calls
-void dbi_register_context(DbiRuntime dbi, void *context);
-void *dbi_get_context(DbiRuntime dbi);
+void dbi_set_context(DbiRuntime dbi, void *context)
+{
+    struct Runtime *runtime = (struct Runtime *) dbi;
+    runtime->context = context;
+}
 
-// Return object associated with var
-struct DbiObject *dbi_get_var(DbiRuntime dbi, char var);
+void *dbi_get_context(DbiRuntime dbi)
+{
+    struct Runtime *runtime = (struct Runtime *) dbi;
+    return runtime->context;
+}
+
+// Get / set object associated with var
+struct DbiObject *dbi_get_var(DbiRuntime dbi, char var)
+{
+    struct Runtime *runtime = (struct Runtime *) dbi;
+    assert((var >= 'a' && var <= 'z') || (var >= 'A' && var <= 'Z'));
+    int offset = var >= 'a' ? 'a' : 'A';
+    return runtime->vars[var - offset];
+}
+
+void dbi_set_var(DbiRuntime dbi, char var, struct DbiObject *obj)
+{
+    struct Runtime *runtime = (struct Runtime *) dbi;
+    assert((var >= 'a' && var <= 'z') || (var >= 'A' && var <= 'Z'));
+    int offset = var >= 'a' ? 'a' : 'A';
+    memcpy(runtime->vars[var - offset], obj, sizeof(*obj));
+}
 
 // Run a file / enter REPL
 bool dbi_repl(char *input_file_name)
 {
     DbiProgram prog = dbi_program_new();
-    bool ret = do_file(input_file_name, (struct Program *) prog, true);
+    bool ret = repl(input_file_name, (struct Program *) prog);
     dbi_program_free(prog);
     return ret;
 }
