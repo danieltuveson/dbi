@@ -1,4 +1,5 @@
-01 helloffi 
-02 sleepffi 1
-03 print "hello from regular print statement"
-04 end
+01 let x = 123 : dolittle
+02 print "x: ", x : helloffi 
+03 sleepffi 1
+04 print "hello from regular print statement"
+05 end

@@ -28,26 +28,26 @@
 static int global_lineno = 0;
 
 // I lied, this is also a mutable global
-#define MAX_ERROR 512
-static char global_err_msg[MAX_ERROR] = {0};
+static char global_err_msg[DBI_MAX_ERROR] = {0};
 
 static void compile_error(const char *fmt, ...)
 {
     int len = strlen(global_err_msg);
     if (global_lineno <= 0) {
-        len += snprintf(global_err_msg + len, MAX_ERROR - len, "Error: ");
+        len += snprintf(global_err_msg + len, DBI_MAX_ERROR - len, "Error: ");
     } else {
-        len += snprintf(global_err_msg + len, MAX_ERROR - len, "Error at line %d: ", global_lineno);
+        len += snprintf(global_err_msg + len, DBI_MAX_ERROR - len, "Error at line %d: ",
+                global_lineno);
     }
     va_list args;
     va_start(args, fmt);
-    len += vsnprintf(global_err_msg + len, MAX_ERROR - len, fmt, args);
+    len += vsnprintf(global_err_msg + len, DBI_MAX_ERROR - len, fmt, args);
     va_end(args);
-    snprintf(global_err_msg + len, MAX_ERROR - len, "\n");
-    if (MAX_ERROR - len <= 0) {
+    snprintf(global_err_msg + len, DBI_MAX_ERROR - len, "\n");
+    if (DBI_MAX_ERROR - len <= 0) {
         char *too_many_errors = "...\n(too many errors to display)\n";
-        len = MAX_ERROR - strlen(too_many_errors) - 1;
-        snprintf(global_err_msg + len, MAX_ERROR - len, too_many_errors);
+        len = DBI_MAX_ERROR - strlen(too_many_errors) - 1;
+        snprintf(global_err_msg + len, DBI_MAX_ERROR - len, too_many_errors);
     }
 #if DBI_DEBUG
     printf("%s", global_err_msg);
@@ -57,7 +57,7 @@ static void compile_error(const char *fmt, ...)
 static void print_errors(void)
 {
     printf("%s", global_err_msg);
-    memset(global_err_msg, 0, MAX_ERROR);
+    memset(global_err_msg, 0, DBI_MAX_ERROR);
 }
 
 char *dbi_strerror(void)
@@ -478,6 +478,7 @@ static struct Statement *statement_next(struct Statement **program, int lineno)
 // *******************************************************************
 
 struct ForeignCall {
+    enum DbiStatus status;
     int argc;
     char *name;
     int extended_command_code; // Numeric value of command, as if it were in enum DbiCommand
@@ -956,7 +957,7 @@ static int compile_print_like(char *input, struct Memory *memory, struct Bytecod
         }
     } while (true);
     if (num_args != -1 && arg_count != num_args) {
-        compile_error("expected %d arguments but got %d", num_args, arg_count);
+        compile_error("expected %d argument(s) but got %d", num_args, arg_count);
         return 0;
     }
 
@@ -1424,6 +1425,7 @@ struct Runtime {
     void *context;
     bool run_file;
     struct Statement *input_stmt;
+    int lineno;
     char *filename;
     bool big_font;
     // Current args
@@ -1456,6 +1458,7 @@ DbiRuntime dbi_runtime_new(void)
     memset(runtime, 0, sizeof(*runtime));
     runtime->vars = calloc(MAX_VARS, sizeof(*runtime->vars));
     objs_init(runtime->vars, MAX_VARS);
+    runtime->lineno = 1;
 
     // Shouldn't be possible to have more command args than memory
     runtime->ffi_argv = calloc(DBI_MAX_LINE_MEMORY, sizeof(*runtime->ffi_argv));
@@ -1475,6 +1478,20 @@ void dbi_runtime_free(DbiRuntime dbi)
     objs_free(runtime->ffi_argv, DBI_MAX_LINE_MEMORY);
     free(runtime->ffi_argv);
     free(runtime);
+}
+
+void dbi_runtime_error(DbiRuntime dbi, const char *fmt, ...)
+{
+    struct Runtime *runtime = (struct Runtime *) dbi;
+    int old_lineno = global_lineno;
+    global_lineno = runtime->lineno;
+
+    va_list args;
+    va_start(args, fmt);
+    compile_error(fmt, args);
+    va_end(args);
+
+    global_lineno = old_lineno;
 }
 
 #define runtime_error(lineno, ...) do {\
@@ -1841,7 +1858,7 @@ static enum DbiStatus execute_line(
                 obj = pop();
                 expect_string("argument for LOAD command");
                 runtime->filename = obj->bstr;
-                return DBI_STATUS_LOAD;
+                return DBI_STATUS_YIELD;
             case OP_SAVE:
                 obj = pop();
                 expect_string("argument for SAVE command");
@@ -1921,14 +1938,20 @@ static enum DbiStatus execute_line(
             case OP_FFI_ARG:
                 assert(runtime->ffi_argc < DBI_MAX_LINE_MEMORY);
                 obj = pop();
-                bobj_copy(runtime->ffi_argv[runtime->ffi_argc], obj);
+                if (obj->type == DBI_VAR) {
+                    bobj_copy(runtime->ffi_argv[runtime->ffi_argc], vars[obj->bvar]);
+                } else {
+                    bobj_copy(runtime->ffi_argv[runtime->ffi_argc], obj);
+                }
                 runtime->ffi_argc++;
                 break;
             case OP_FFI_CALL:
                 obj = pop();
+                runtime->lineno = stmt->lineno;
                 DbiForeignCall call = program->foreign_call_table[obj->bint];
                 status = call((DbiRuntime) runtime);
                 runtime->ffi_argc = 0;
+                runtime->lineno++;
                 if (status != DBI_STATUS_GOOD) {
                     return status;
                 }
@@ -2053,7 +2076,8 @@ static bool repl(char *input_file_name, struct Program *program)
             if (status == DBI_STATUS_FINISHED) {
                 statement_free(stmt);
                 break;
-            } else if (status == DBI_STATUS_LOAD) {
+            } else if (status == DBI_STATUS_YIELD) {
+                // For now, YIELD always indicates a LOAD command in the repl
                 if (file != stdin) {
                     fclose(file);
                 }
@@ -2211,7 +2235,7 @@ bool compile_code(DbiProgram prog, struct Code *code)
         compile_error("empty program");
         return false;
     }
-    memset(global_err_msg, 0, MAX_ERROR);
+    memset(global_err_msg, 0, DBI_MAX_ERROR);
     struct Program *program = (struct Program *) prog;
     assert(program->has_compiled == false);
 
@@ -2255,7 +2279,10 @@ void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int 
     fc->name = name;
     // Commands must be all caps, no other letters
     while (*name != '\0') {
-        assert(*name >= 'A' && *name <= 'Z');
+        if (!(*name >= 'A' && *name <= 'Z')) {
+            printf("Improper usage: command name must be uppercase, letters A-Z\n");
+            assert(false);
+        }
         name++;
     }
     fc->call = call;
@@ -2282,10 +2309,10 @@ void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int 
 // Executes program in runtime
 enum DbiStatus dbi_run(DbiRuntime dbi, DbiProgram prog)
 {
-    memset(global_err_msg, 0, MAX_ERROR);
+    memset(global_err_msg, 0, DBI_MAX_ERROR);
     struct Runtime *runtime = (struct Runtime *) dbi;
     struct Program *program = (struct Program *) prog;
-    struct Statement *stmt = statement_next(program->statements, 0);
+    struct Statement *stmt = statement_next(program->statements, runtime->lineno);
     enum DbiStatus status = execute_line(runtime, stmt, program, true);
     return status;
 }
