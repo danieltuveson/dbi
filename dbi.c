@@ -1428,6 +1428,8 @@ struct Runtime {
     int lineno;
     char *filename;
     bool big_font;
+    int callstack_offset;
+    int *callstack;
     // Current args
     int ffi_argc;
     struct DbiObject **ffi_argv;
@@ -1463,6 +1465,8 @@ DbiRuntime dbi_runtime_new(void)
     // Shouldn't be possible to have more command args than memory
     runtime->ffi_argv = calloc(DBI_MAX_LINE_MEMORY, sizeof(*runtime->ffi_argv));
     objs_init(runtime->ffi_argv, DBI_MAX_LINE_MEMORY);
+
+    runtime->callstack = calloc(DBI_MAX_CALL_STACK, sizeof(*runtime->callstack));
     return (DbiRuntime) runtime;
 }
 
@@ -1475,8 +1479,11 @@ void dbi_runtime_free(DbiRuntime dbi)
         runtime->input_stmt = NULL;
     }
     free(runtime->vars);
+
     objs_free(runtime->ffi_argv, DBI_MAX_LINE_MEMORY);
     free(runtime->ffi_argv);
+
+    free(runtime->callstack);
     free(runtime);
 }
 
@@ -1684,8 +1691,8 @@ static enum DbiStatus execute_line(
     int stack_offset = 0;
     struct DbiObject stack[DBI_MAX_STACK];
 
-    int callstack_offset = 0;
-    int callstack[DBI_MAX_CALL_STACK];
+    int callstack_offset = runtime->callstack_offset;
+    int *callstack = runtime->callstack;
 
     struct DbiObject *obj;
     int ip = 0;
@@ -1952,7 +1959,10 @@ static enum DbiStatus execute_line(
                 status = call((DbiRuntime) runtime);
                 runtime->ffi_argc = 0;
                 runtime->lineno++;
-                if (status != DBI_STATUS_GOOD) {
+                if (status == DBI_STATUS_YIELD) {
+                    runtime->callstack_offset = callstack_offset;
+                    return status;
+                } else if (status != DBI_STATUS_GOOD) {
                     return status;
                 }
                 break;
@@ -1991,8 +2001,9 @@ void temps_init(char *input, struct Memory *temp_memory, struct Bytecode *temp_b
 
 // Loads provided file then executes RUN command
 // If filename is NULL it will drop into the REPL and not execute RUN
-static bool repl(char *input_file_name, struct Program *program)
+bool dbi_repl(DbiProgram prog, char *input_file_name)
 {
+    struct Program *program = (struct Program *) prog;
     bool run_file;
     FILE *file;
 
@@ -2357,14 +2368,5 @@ void dbi_set_var(DbiRuntime dbi, char var, struct DbiObject *obj)
     assert((var >= 'a' && var <= 'z') || (var >= 'A' && var <= 'Z'));
     int offset = var >= 'a' ? 'a' : 'A';
     memcpy(runtime->vars[var - offset], obj, sizeof(*obj));
-}
-
-// Run a file / enter REPL
-bool dbi_repl(char *input_file_name)
-{
-    DbiProgram prog = dbi_program_new();
-    bool ret = repl(input_file_name, (struct Program *) prog);
-    dbi_program_free(prog);
-    return ret;
 }
 

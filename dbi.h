@@ -106,8 +106,9 @@ struct DbiObject **dbi_get_argv(DbiRuntime dbi);
 struct DbiObject *dbi_get_var(DbiRuntime dbi, char var);
 void dbi_set_var(DbiRuntime dbi, char var, struct DbiObject *obj);
 
-// If you just want to interactively run a BASIC script, use this (NULL just drops you into repl)
-bool dbi_repl(char *input_file_name);
+// If you just want to interactively run a BASIC script, use this (passing NULL for the file name
+// just drops you into repl)
+bool dbi_repl(DbiProgram prog, char *input_file_name);
 
 #endif
 

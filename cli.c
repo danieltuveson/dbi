@@ -1,50 +1,50 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include "dbi.h"
+
+// Could just as easily replace this with a `!`, but that gets a little confusing
+#define status(val) val ? EXIT_SUCCESS : EXIT_FAILURE
 
 int main(int argc, char *argv[])
 {
+    DbiProgram prog = dbi_program_new();
+    int ret = EXIT_FAILURE;
     if (argc < 2) {
-        return !dbi_repl(NULL);
+        ret = status(dbi_repl(prog, NULL));
     } else if (argc == 2) {
-        if (argv[1][0] == '-') {
-            printf("Error: expected file name\n");
-            return 0;
+        ret = status(dbi_repl(prog, argv[1]));
+        if (ret == EXIT_FAILURE) {
+            printf("%s", dbi_strerror());
         }
-        return !dbi_repl(argv[1]);
     } else if (argc == 3) {
         if (strcmp(argv[1], "-c") == 0) {
-            DbiProgram prog = dbi_program_new();
-            if (!dbi_compile_file(prog, argv[2])) {
+            ret = status(dbi_compile_file(prog, argv[2]));
+            if (ret == EXIT_FAILURE) {
                 printf("%s", dbi_strerror());
-                return 1;
             }
-            dbi_program_free(prog);
-            return 0;
         } else if (strcmp(argv[1], "-e") == 0) {
-            DbiProgram prog = dbi_program_new();
-            if (!dbi_compile_string(prog, argv[2])) {
+            ret = status(dbi_compile_file(prog, argv[2]));
+            if (ret == EXIT_FAILURE) {
                 printf("%s", dbi_strerror());
-                return 1;
+            } else {
+                DbiRuntime dbi = dbi_runtime_new();
+                ret = status(dbi_run(dbi, prog));
+                if (ret == EXIT_FAILURE) {
+                    printf("%s", dbi_strerror());
+                }
+                dbi_runtime_free(dbi);
             }
-            DbiRuntime dbi = dbi_runtime_new();
-            if (!dbi_run(dbi, prog)) {
-                printf("%s", dbi_strerror());
-                dbi_program_free(prog);
-                return 1;
-            }
-            dbi_runtime_free(dbi);
-            dbi_program_free(prog);
-            return 0;
         } else if (strcmp(argv[1], "-r") == 0) {
-            return !dbi_repl(argv[2]);
+            ret = status(dbi_repl(prog, argv[2]));
         } else {
             printf("Error: unknown argument %s\n", argv[1]);
-            return 0;
         }
+    } else {
+        printf("Error: invalid arguments\n");
     }
-    printf("Error: invalid arguments\n");
-    return 1;
+    dbi_program_free(prog);
+    return ret;
 }
 

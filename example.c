@@ -3,10 +3,11 @@
  * 1. Simple "Hello, world!" from FFI
  * 2. A more complex example using function arguments and error handling
  * 3. A function that accepts multiple arguments of different types
- * 4. Example of returning control to C program without ending execution
- * 5. Extending the language by adding an error handling mechanism
+ * 4. Example of passing control back and forth between C and DBI
  */
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <dbi.h>
 #include <unistd.h>
 #include <assert.h>
@@ -125,7 +126,6 @@ void example_slow_print(void)
 {
     DbiProgram prog = dbi_program_new();
 
-    // Register command HELLOFFI that calls C function hello_ffi, with zero arguments
     dbi_register_command(prog, "SLOWPRINT", slow_print_ffi, -1);
 
     bool ret = dbi_compile_string(prog, slow_print_program);
@@ -140,81 +140,82 @@ void example_slow_print(void)
     dbi_program_free(prog);
 }
 
+// *******************************************************************
+// ***************************** Yielding **************************** 
+// *******************************************************************
+char *echo_program =
+    "01 gosub 11\n"
+    "02 print \"n: \", n\n"
+    "03 end\n"
+
+    "11 print \"Enter a number, n:\" : input n\n"
+    "12 print \"Type something, and I'll print it \", n, \" times. Type 'stop' to end.\"\n"
+    "13 echo n\n"
+    "14 return\n"
+;
+
+enum DbiStatus echo_ffi(DbiRuntime dbi)
+{
+    struct DbiObject **argv = dbi_get_argv(dbi);
+    if (argv[0]->type != DBI_INT) {
+        dbi_runtime_error(dbi, "expected numeric value in ECHO but got a string");
+        return DBI_STATUS_ERROR;
+    }
+    int *ctx = (int *) dbi_get_context(dbi);
+    *ctx = argv[0]->bint;
+    return DBI_STATUS_YIELD;
+}
+
+void example_echo(void)
+{
+    DbiProgram prog = dbi_program_new();
+
+    dbi_register_command(prog, "ECHO", echo_ffi, 1);
+
+    bool ret = dbi_compile_string(prog, echo_program);
+    assert(ret);
+    
+    DbiRuntime dbi = dbi_runtime_new();
+
+    int ctx = 0;
+    dbi_set_context(dbi, &ctx);
+
+    enum DbiStatus status;
+    while (true) {
+        status = dbi_run(dbi, prog);
+        if (status != DBI_STATUS_YIELD) {
+            break;
+        }
+
+        char *str = NULL;
+        size_t size;
+        while (1) {
+            getline(&str, &size, stdin);
+            if (strcmp(str, "stop\n") == 0) {
+                free(str);
+                break;
+            }
+            for (int i = 0; i < ctx; i++) {
+                printf("%s", str);
+            }
+            free(str);
+            str = NULL;
+        }
+    }
+    if (status == DBI_STATUS_ERROR) {
+        printf("%s", dbi_strerror());
+    }
+
+    dbi_runtime_free(dbi);
+    dbi_program_free(prog);
+}
 
 int main(int argc, char *argv[])
 {
-    example_hello_world();
-    example_sleep();
-    example_slow_print();
+    example_echo();
+    // example_slow_print();
+    // example_sleep();
+    // example_hello_world();
     return 0;
 }
-
-// enum DbiStatus do_a_little_stuff(DbiRuntime dbi)
-// {
-//     char **context = dbi_get_context(dbi);
-//     *context = "dolittle called";
-//     return DBI_STATUS_YIELD;
-// }
-// 
-// enum DbiStatus hello_ffi(DbiRuntime dbi)
-// {
-//     char **context = dbi_get_context(dbi);
-//     printf("%s i: %d!\n", *context, dbi_get_var(dbi, 'a')->bint);
-//     *context = "hello from the old context!";
-//     return DBI_STATUS_GOOD;
-// }
-
-// {
-//     if (argc != 2) {
-//         printf("expected filename\n");
-//         return 1;
-//     }
-//     DbiProgram prog = dbi_program_new();
-// 
-//     dbi_register_command(prog, "HELLOFFI", hello, 0);
-//     dbi_register_command(prog, "SLEEPFFI", ffi_sleep, 1);
-//     dbi_register_command(prog, "DOLITTLE", do_a_little_stuff, 0);
-// 
-//     bool ret = dbi_compile_file(prog, argv[1]);
-//     if (!ret) {
-//         printf("%s", dbi_strerror());
-//         dbi_program_free(prog);
-//         return 0;
-//     }
-// 
-//     char *context = "hello from context!";
-//     DbiRuntime dbi = dbi_runtime_new();
-//     dbi_set_context(dbi, &context);
-// 
-//     enum DbiStatus status;
-//     do {
-//         status = dbi_run(dbi, prog);
-//     } while (status == DBI_STATUS_YIELD);
-//     if (status != DBI_STATUS_GOOD) {
-//         printf("%s", dbi_strerror());
-//     }
-//     dbi_runtime_free(dbi);
-//     // dbi_run(dbi, prog);
-// 
-//     // struct DbiObject bob = { DBI_INT, { .bint = 123 } };
-//     // char *context = "hello from context!";
-//     // for (int i = 0; i < 2; i++) {
-//     //     DbiRuntime dbi = dbi_runtime_new();
-//     //     dbi_set_context(dbi, &context);
-//     //     bob.bint = i;
-//     //     dbi_set_var(dbi, 'a', &bob);
-//     //     if (!dbi_run(dbi, prog)) {
-//     //         printf("%s", dbi_strerror());
-//     //     }
-//     //     dbi_runtime_free(dbi);
-//     // }
-// 
-//     dbi_program_free(prog);
-// 
-//     if (ret) {
-//         printf("All good\n");
-//         return 0;
-//     }
-//     return 1;
-// }
 
