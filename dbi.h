@@ -4,13 +4,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// Hardcoded so max of 4 digit numbers for GOTOs and such - adjust as needed
-#define DBI_MAX_PROG_SIZE 10000
-
 // Should be set to *at least* whatever longest command name is (+1 character for null byte)
 #define DBI_MAX_COMMAND_NAME 32 
 
 // Arbitrary - adjust as needed
+#define DBI_MAX_PROG_SIZE 10000
 #define DBI_MAX_LINE_LENGTH 256 // Max number of chars that can be parsed in one line
 #define DBI_MAX_STACK 128       // Max number of arithmatic expressions that can be on the stack
 #define DBI_MAX_CALL_STACK 16   // Max depth of call stack (GOSUB's / RETURN)
@@ -24,22 +22,9 @@
 // Toggling turns on some debug printing
 #define DBI_DEBUG 0
 
-// Can disable specific commands, if desired, by setting to DBI_UNDEFINED
-// Some commands like "END" are required for basic functionality and should not be disabled
-// List below might be helpful for a sandboxed subset of commands if we want to compile
-// arbitrary user code
-// #define DBI_INPUT  DBI_UNDEFINED
-// #define DBI_CLEAR  DBI_UNDEFINED 
-// #define DBI_SLEEP  DBI_UNDEFINED
-// #define DBI_QUOTE  DBI_UNDEFINED
-// #define DBI_PRINT  DBI_UNDEFINED
-// #define DBI_LIST   DBI_UNDEFINED
-// #define DBI_LOAD   DBI_UNDEFINED
-// #define DBI_BIG    DBI_UNDEFINED
-// #define DBI_SAVE   DBI_UNDEFINED
-// #define DBI_SYSTEM DBI_UNDEFINED
-// #define DBI_BEEP   DBI_UNDEFINED
-// #define DBI_HELP   DBI_UNDEFINED
+// Toggle to disable all commands that use IO
+// Can be useful if embedding dbi into a non-cli application
+#define DBI_DISABLE_IO 0
 
 enum DbiType {
     DBI_INT,
@@ -73,6 +58,7 @@ typedef enum DbiStatus (*DbiForeignCall)(DbiRuntime dbi);
 // expected number of arguments for command
 // The compiler will check if the correct number of arguments have been supplied before runtime.
 // Command names *must* be unique and may not conflict with builtin command names
+// `doc` can contain up to 50 characters of documentation text.
 void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int argc);
 
 // You may only call dbi_compile once per program

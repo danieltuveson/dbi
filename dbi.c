@@ -10,14 +10,19 @@
 #include <errno.h>
 #include "dbi.h"
 
-#define FF_SLEEP 1
-#define FF_BIG 1
+#if DBI_DISABLE_IO
+#define DBI_DISABLE_BIG 1
+#define DBI_DISABLE_SLEEP 1
+#else
+#define DBI_DISABLE_BIG 0
+#define DBI_DISABLE_SLEEP 0
+#endif
 
-#if FF_BIG
+#if !DBI_DISABLE_BIG
 #include "bigtext.c"
 #endif
 
-#if FF_SLEEP
+#if !DBI_DISABLE_SLEEP
 #include <unistd.h>
 #endif
 
@@ -69,45 +74,22 @@ char *dbi_strerror(void)
 // ***************************** Commands ****************************
 // *******************************************************************
 
-enum DbiCommand {
-    DBI_UNDEFINED, DBI_PRINT,   DBI_IF,      DBI_GOTO,
-    DBI_INPUT,     DBI_LET,     DBI_GOSUB,   DBI_RETURN,
-    DBI_CLEAR,     DBI_LIST,    DBI_RUN,     DBI_QUOTE,
-    DBI_REM,       DBI_LOAD,    DBI_SAVE,    DBI_BEEP,
-    DBI_SLEEP,     DBI_BIG,     DBI_SYSTEM,  DBI_HELP,
-    DBI_END
+enum Command {
+    UNDEFINED, PRINT,   IF,      GOTO,
+    INPUT,     LET,     GOSUB,   RETURN,
+    CLEAR,     LIST,    RUN,     QUOTE,
+    REM,       LOAD,    SAVE,    BEEP,
+    SLEEP,     BIG,     SYSTEM,  HELP,
+    END
 };
 
-// Note: Other parts of the code assume that DBI_END is the largest value in this list.
-//       If new commands are added to this list, add them before DBI_END.
-#define LAST_COMMAND DBI_END
-
-// Make it so commands can be overriden in dbi.h
-#define UNDEFINED DBI_UNDEFINED
-#define PRINT     DBI_PRINT
-#define INPUT     DBI_INPUT
-#define CLEAR     DBI_CLEAR
-#define REM       DBI_REM  
-#define SLEEP     DBI_SLEEP
-#define QUOTE     DBI_QUOTE
-#define IF        DBI_IF
-#define LET       DBI_LET
-#define LIST      DBI_LIST
-#define LOAD      DBI_LOAD
-#define BIG       DBI_BIG
-#define GOTO      DBI_GOTO
-#define GOSUB     DBI_GOSUB
-#define RUN       DBI_RUN
-#define SAVE      DBI_SAVE
-#define SYSTEM    DBI_SYSTEM
-#define RETURN    DBI_RETURN
-#define END       DBI_END
-#define BEEP      DBI_BEEP
-#define HELP      DBI_HELP
+// Note: Other parts of the code assume that END is the largest value in this list.
+//       If new commands are added to this list, add them before END.
+#define LAST_COMMAND END
 
 struct CommandMapping {
     char *str;
-    enum DbiCommand command;
+    enum Command command;
     char *helpstr;
     char *helpex;
 };
@@ -128,10 +110,10 @@ struct CommandMapping command_map[] = {
     { "LOAD",   LOAD,   "load code from file",                                "LOAD expr" },
     { "SAVE",   SAVE,   "save code to file",                                  "SAVE expr" },
     { "BEEP",   BEEP,   "rings the bell",                                     "BEEP" },
-#if FF_SLEEP
+#if !DBI_DISABLE_SLEEP
     { "SLEEP",  SLEEP,  "sleeps for number of seconds",                   "SLEEP expr" },
 #endif
-#if FF_BIG
+#if !DBI_DISABLE_BIG
     { "BIG",    BIG,    "toggles text embiggening",                       "BIG" },
 #endif
     { "SYSTEM", SYSTEM, "run terminal command",                           "SYSTEM expr" },
@@ -141,10 +123,10 @@ struct CommandMapping command_map[] = {
 
 int command_map_size = sizeof(command_map) / sizeof(*command_map);
 
-static char *command_to_str(enum DbiCommand command)
+static char *command_to_str(enum Command command)
 {
     for (int i = 0; i < command_map_size; i++) {
-        enum DbiCommand command_i = command_map[i].command;
+        enum Command command_i = command_map[i].command;
         if (command_i != UNDEFINED && command_i == command) {
             return command_map[i].str;
         }
@@ -481,7 +463,7 @@ struct ForeignCall {
     enum DbiStatus status;
     int argc;
     char *name;
-    int extended_command_code; // Numeric value of command, as if it were in enum DbiCommand
+    int extended_command_code; // Numeric value of command, as if it were in enum Command
     DbiForeignCall call;
     struct ForeignCall *next;
 };
@@ -545,10 +527,10 @@ enum Opcode {
     OP_LOAD,
     OP_SAVE,
     OP_HELP,
-#if FF_SLEEP
+#if !DBI_DISABLE_SLEEP
     OP_SLEEP,
 #endif
-#if FF_BIG
+#if !DBI_DISABLE_BIG
     OP_BIG,
 #endif
     OP_SYSTEM,
@@ -620,12 +602,12 @@ static int parse_lineno(char *input, int *lineno)
     *lineno = 0;
     int i = 0;
     while (isdigit(input[i])) {
-        if (i > 4) {
+        *lineno = *lineno * 10 + input[i] - '0';
+        if (i > (int) sizeof(int) || *lineno >= DBI_MAX_PROG_SIZE) {
             compile_error("line number exceeds maximum value of %d", DBI_MAX_PROG_SIZE - 1);
             global_lineno = -1;
             return -1;
         }
-        *lineno = *lineno * 10 + input[i] - '0';
         i++;
     }
     if (*lineno == 0) {
@@ -639,7 +621,7 @@ static int parse_lineno(char *input, int *lineno)
 
 // Returns number of chars consumed
 static int parse_command_name(char *input, struct ForeignCall *foreign_calls, 
-        enum DbiCommand *command_ptr)
+        enum Command *command_ptr)
 {
     char command[DBI_MAX_COMMAND_NAME] = {0};
     int i = 0;
@@ -964,6 +946,7 @@ static int compile_print_like(char *input, struct Memory *memory, struct Bytecod
     return input - init_input;
 }
 
+#if !DBI_DISABLE_IO
 static int compile_print(char *input, struct Memory *memory, struct Bytecode *bytecode)
 {
     int char_count = compile_print_like(input, memory, bytecode, OP_PRINT, -1);
@@ -973,6 +956,7 @@ static int compile_print(char *input, struct Memory *memory, struct Bytecode *by
     }
     return char_count;
 }
+#endif
 
 static int parse_relop(char *input, enum Opcode *op)
 {
@@ -1009,11 +993,11 @@ static int parse_relop(char *input, enum Opcode *op)
 
 static int compile_statement(char *input, struct ForeignCall *foreign_calls,
         struct Memory *memory, struct Bytecode *bytecode,
-        int lineno, enum DbiCommand *command_ptr);
+        int lineno, enum Command *command_ptr);
 
 static int compile_if(char *input, struct ForeignCall *foreign_calls, 
         struct Memory *memory, struct Bytecode *bytecode,
-        int lineno, enum DbiCommand *command_ptr)
+        int lineno, enum Command *command_ptr)
 {
     char *init_input = input;
 
@@ -1088,6 +1072,7 @@ static int compile_if(char *input, struct ForeignCall *foreign_calls,
     return input - init_input;
 }
 
+#if !DBI_DISABLE_IO
 static int compile_input(char *input, struct Bytecode *bytecode)
 {
     char *init_input = input;
@@ -1135,6 +1120,7 @@ static int compile_input(char *input, struct Bytecode *bytecode)
     }
     return input - init_input;
 }
+#endif
 
 // Generic method for compiling commands similar to LET
 static int compile_let_like(char *input, struct Memory *memory, struct Bytecode *bytecode,
@@ -1189,12 +1175,12 @@ static bool compile_foreign(struct ForeignCall *foreign_call, struct Memory *mem
 
 static int compile_statement(char *input, struct ForeignCall *foreign_calls,
         struct Memory *memory, struct Bytecode *bytecode,
-        int lineno, enum DbiCommand *command_ptr)
+        int lineno, enum Command *command_ptr)
 {
     char *init_input = input;
 
     // Get command
-    enum DbiCommand command;
+    enum Command command;
     int chars_parsed = parse_command_name(input, foreign_calls, &command);
     if (!chars_parsed) {
         return 0;
@@ -1213,6 +1199,7 @@ static int compile_statement(char *input, struct ForeignCall *foreign_calls,
         input += chars_parsed;
     }
     switch (command) {
+#if !DBI_DISABLE_IO
         case PRINT:
             chars_parsed = compile_print(input, memory, bytecode);
             if (!chars_parsed) {
@@ -1220,6 +1207,7 @@ static int compile_statement(char *input, struct ForeignCall *foreign_calls,
             }
             input += chars_parsed;
             break;
+#endif
         case IF:
             chars_parsed = compile_if(input, foreign_calls, memory, bytecode, lineno, command_ptr);
             if (!chars_parsed) {
@@ -1227,6 +1215,7 @@ static int compile_statement(char *input, struct ForeignCall *foreign_calls,
             }
             input += chars_parsed;
             break;
+#if !DBI_DISABLE_IO
         case INPUT:
             chars_parsed = compile_input(input, bytecode);
             if (!chars_parsed) {
@@ -1234,6 +1223,7 @@ static int compile_statement(char *input, struct ForeignCall *foreign_calls,
             }
             input += chars_parsed;
             break;
+#endif
         case LET:
             chars_parsed = compile_let(input, memory, bytecode);
             if (!chars_parsed) {
@@ -1261,12 +1251,14 @@ static int compile_statement(char *input, struct ForeignCall *foreign_calls,
         case RETURN:
             bytecode_add(bytecode, OP_RETURN);
             break;
+#if !DBI_DISABLE_IO
         case CLEAR:
             bytecode_add(bytecode, OP_CLEAR);
             break;
         case LIST:
             bytecode_add(bytecode, OP_LIST);
             break;
+#endif
         case RUN:
             bytecode_add(bytecode, OP_RUN);
             break;
@@ -1277,6 +1269,7 @@ static int compile_statement(char *input, struct ForeignCall *foreign_calls,
             bytecode_add(bytecode, OP_NO);
             while (*input != '\0') input++;
             break;
+#if !DBI_DISABLE_IO
         case LOAD:
             bytecode_add(bytecode, OP_LOAD);
             break;
@@ -1301,22 +1294,25 @@ static int compile_statement(char *input, struct ForeignCall *foreign_calls,
             bytecode_add(bytecode, mem_loc);
             bytecode_add(bytecode, OP_PRINTLN);
             break;
-#if FF_SLEEP
+#endif
+#if !DBI_DISABLE_SLEEP
         case SLEEP:
             bytecode_add(bytecode, OP_SLEEP);
             break;
 #endif
-#if FF_BIG
+#if !DBI_DISABLE_BIG
         case BIG:
             bytecode_add(bytecode, OP_BIG);
             break;
 #endif
+#if !DBI_DISABLE_IO
         case SYSTEM:
             bytecode_add(bytecode, OP_SYSTEM);
             break;
         case HELP:
             bytecode_add(bytecode, OP_HELP);
             break;
+#endif
         default:
             for (int i = 0; foreign_calls != NULL; i++) {
                 if (foreign_calls->extended_command_code == (int) command) {
@@ -1389,7 +1385,7 @@ static struct Statement *compile_line(char *input, struct ForeignCall *foreign_c
     do {
         ignore_whitespace(&input);
 
-        enum DbiCommand command;
+        enum Command command;
         chars_parsed = compile_statement(input, foreign_calls, memory, bytecode, lineno, &command);
         if (!chars_parsed) {
             memory_clear(memory);
@@ -1513,7 +1509,7 @@ static void bobj_print(struct DbiObject *obj, struct DbiObject **vars, bool big_
     if (obj->type == DBI_VAR) {
         obj = vars[obj->bvar];
     }
-#if FF_BIG
+#if !DBI_DISABLE_BIG
     if (big_font) {
         size_t len;
         char *strbuff;
@@ -1544,7 +1540,7 @@ static void bobj_print(struct DbiObject *obj, struct DbiObject **vars, bool big_
             printf("%s", obj->bstr);
         } else {
             runtime_error(-1, "Internal runtime error: unknown type in PRINT statement");
-#if FF_BIG
+#if !DBI_DISABLE_BIG
         }
 #endif
     }
@@ -1874,14 +1870,14 @@ static enum DbiStatus execute_line(
                     return DBI_STATUS_ERROR;
                 }
                 break;
-#if FF_SLEEP
+#if !DBI_DISABLE_SLEEP
             case OP_SLEEP:
                 obj = pop();
                 expect_int("argument for SLEEP command");
                 sleep(obj->bint);
                 break;
 #endif
-#if FF_BIG
+#if !DBI_DISABLE_BIG
             case OP_BIG:
                 runtime->big_font = !runtime->big_font;
                 break;
@@ -2313,7 +2309,7 @@ void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int 
         }
         fc_temp = program->foreign_calls->next;
     }
-    fc->extended_command_code = DBI_END + count;
+    fc->extended_command_code = LAST_COMMAND + count;
     fc_temp->next = fc;
 }
 
