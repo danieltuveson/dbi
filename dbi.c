@@ -496,6 +496,7 @@ void dbi_program_free(DbiProgram prog)
 {
     assert(prog != 0);
     struct Program *program = (struct Program *) prog;
+    foreign_calls_free(program->foreign_calls);
     program_clear(program->statements);
     if (program->foreign_call_table) {
         free(program->foreign_call_table);
@@ -2136,6 +2137,7 @@ static void code_init_text(struct Code *code, char *text)
     code->text = text;
 }
 
+// Not necessary to call this for non-file input - but doesn't hurt either
 static void code_free(struct Code *code)
 {
     if (code->isfile) {
@@ -2145,7 +2147,7 @@ static void code_free(struct Code *code)
 }
 
 // fgets replacement for not-file inputs
-char *cgets(char s[DBI_MAX_LINE_LENGTH], int size, struct Code *code)
+static char *cgets(char s[DBI_MAX_LINE_LENGTH], int size, struct Code *code)
 {
     if (code->isfile) {
         return fgets(s, size, code->file);
@@ -2166,7 +2168,7 @@ char *cgets(char s[DBI_MAX_LINE_LENGTH], int size, struct Code *code)
     }
 }
 
-// Boilerplate setup / cleanup for running, compiling, or just jumping into REPL
+// Boilerplate setup / cleanup for compiling
 static bool compile(struct Code *code, struct Program *program)
 {
     char input[DBI_MAX_LINE_LENGTH];
@@ -2206,18 +2208,16 @@ static bool compile(struct Code *code, struct Program *program)
             /* No line number is an error in compile mode */
             compile_error("statement missing line number");
         } else {
-            /* Replacing a line that already exists is an error in compile mode */
             if (program->statements[stmt->lineno]) {
-                compile_error("overwriting existing line at %d", stmt->lineno);
-            } else {
-                program->statements[stmt->lineno] = stmt;
+                statement_free(program->statements[stmt->lineno]);
             }
+            program->statements[stmt->lineno] = stmt;
         }
     }
     return global_err_msg[0] == '\0';
 }
 
-void foreign_call_table_init(struct Program *program)
+static void foreign_call_table_init(struct Program *program)
 {
     int count = 0;
     struct ForeignCall *foreign_calls = program->foreign_calls;
@@ -2236,7 +2236,7 @@ void foreign_call_table_init(struct Program *program)
     }
 }
 
-bool compile_code(DbiProgram prog, struct Code *code)
+static bool compile_code(DbiProgram prog, struct Code *code)
 {
     if (!prog) {
         compile_error("empty program");
@@ -2244,15 +2244,13 @@ bool compile_code(DbiProgram prog, struct Code *code)
     }
     memset(global_err_msg, 0, DBI_MAX_ERROR);
     struct Program *program = (struct Program *) prog;
-    assert(program->has_compiled == false);
 
-    foreign_call_table_init(program);
+    if (!program->has_compiled) {
+        foreign_call_table_init(program);
+        program->has_compiled = true;
+    }
     bool ret = compile(code, program);
 
-    // We can just use foreign_table in the runtime
-    foreign_calls_free(program->foreign_calls);
-    program->foreign_calls = NULL;
-    program->has_compiled = true;
     return ret;
 }
 
@@ -2281,6 +2279,7 @@ void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int 
 {
     assert(argc >= -1);
     struct Program *program = (struct Program *) prog;
+    assert(!program->has_compiled);
     struct ForeignCall *fc = malloc(sizeof(*fc));
     fc->argc = argc;
     fc->name = name;
@@ -2364,5 +2363,14 @@ void dbi_set_var(DbiRuntime dbi, char var, struct DbiObject *obj)
     assert((var >= 'a' && var <= 'z') || (var >= 'A' && var <= 'Z'));
     int offset = var >= 'a' ? 'a' : 'A';
     memcpy(runtime->vars[var - offset], obj, sizeof(*obj));
+}
+
+char *dbi_get_line(DbiProgram prog, int lineno)
+{
+    assert(lineno > 0);
+    assert(lineno < DBI_MAX_PROG_SIZE);
+    struct Program *program = (struct Program *) prog;
+    struct Statement *stmt = program->statements[lineno];
+    return stmt->line;
 }
 

@@ -61,10 +61,12 @@ typedef enum DbiStatus (*DbiForeignCall)(DbiRuntime dbi);
 // `doc` can contain up to 50 characters of documentation text.
 void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int argc);
 
-// You may only call dbi_compile once per program
-// All foreign commands must be registered before compilation
+// Note: all C function commands must be registered before compilation.
+//       dbi_compile_* functions can be called multiple times with different inputs. If the line
+//       number overlaps with an existing line, the existing line will be overwritten.
 bool dbi_compile_file(DbiProgram prog, char *input_file_name);
 bool dbi_compile_string(DbiProgram prog, char *text);
+
 DbiProgram dbi_program_new(void);
 void dbi_program_free(DbiProgram prog);
 
@@ -95,6 +97,9 @@ void dbi_set_var(DbiRuntime dbi, char var, struct DbiObject *obj);
 // If you just want to interactively run a BASIC script, use this (passing NULL for the file name
 // just drops you into repl)
 bool dbi_repl(DbiProgram prog, char *input_file_name);
+
+// Get text of line at given number
+char *dbi_get_line(DbiProgram prog, int lineno);
 
 #endif
 
