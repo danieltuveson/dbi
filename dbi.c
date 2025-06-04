@@ -100,27 +100,35 @@ struct CommandMapping command_map[] = {
 #endif
     { "IF",     IF,     "conditionally execute statement",       "IF expr relop expr THEN stmt" },
     { "GOTO",   GOTO,   "jump to given line number",                          "GOTO expr" },
+#if !DBI_DISABLE_IO
     { "INPUT",  INPUT,  "get user input(s) and assign to variable(s)",        "INPUT var-list" },
+#endif
     { "LET",    LET,    "set variable to expression",                         "LET var = expr" },
     { "GOSUB",  GOSUB,  "jump to given line number",                          "GOSUB expr" },
     { "RETURN", RETURN, "return to the line following the last GOSUB called", "RETURN" },
+#if !DBI_DISABLE_IO
     { "CLEAR",  CLEAR,  "delete loaded code",                                 "CLEAR" },
     { "LIST",   LIST,   "print out loaded code",                              "LIST" },
+#endif
     { "RUN",    RUN,    "execute loaded code",                                "RUN" },
     { "END",    END,    "end execution of program",                           "END" },
     { "REM",    REM,    "adds a comment",                                     "REM comment" },
+#if !DBI_DISABLE_IO
     { "LOAD",   LOAD,   "load code from file",                                "LOAD expr" },
     { "SAVE",   SAVE,   "save code to file",                                  "SAVE expr" },
     { "BEEP",   BEEP,   "rings the bell",                                     "BEEP" },
+#endif
 #if !DBI_DISABLE_SLEEP
     { "SLEEP",  SLEEP,  "sleeps for number of seconds",                   "SLEEP expr" },
 #endif
 #if !DBI_DISABLE_BIG
     { "BIG",    BIG,    "toggles text embiggening",                       "BIG" },
 #endif
+#if !DBI_DISABLE_BIG
     { "SYSTEM", SYSTEM, "run terminal command",                           "SYSTEM expr" },
     { "QUOTE",  QUOTE,  "an inspirational quote",                         "QUOTE" },
     { "HELP",   HELP,   "you just ran this",                              "HELP" },
+#endif
 };
 
 int command_map_size = sizeof(command_map) / sizeof(*command_map);
