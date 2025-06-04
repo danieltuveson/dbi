@@ -95,7 +95,9 @@ struct CommandMapping {
 };
 
 struct CommandMapping command_map[] = {
+#if !DBI_DISABLE_IO
     { "PRINT",  PRINT,  "print concatenated expression list",                 "PRINT expr-list" },
+#endif
     { "IF",     IF,     "conditionally execute statement",       "IF expr relop expr THEN stmt" },
     { "GOTO",   GOTO,   "jump to given line number",                          "GOTO expr" },
     { "INPUT",  INPUT,  "get user input(s) and assign to variable(s)",        "INPUT var-list" },

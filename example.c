@@ -129,6 +129,7 @@ void example_slow_print(void)
     dbi_register_command(prog, "SLOWPRINT", slow_print_ffi, -1);
 
     bool ret = dbi_compile_string(prog, slow_print_program);
+    printf("%s\n", dbi_strerror());
     assert(ret);
 
     DbiRuntime dbi = dbi_runtime_new();
@@ -212,8 +213,8 @@ void example_echo(void)
 
 int main(int argc, char *argv[])
 {
-    example_echo();
-    // example_slow_print();
+    // example_echo();
+    example_slow_print();
     // example_sleep();
     // example_hello_world();
     return 0;
