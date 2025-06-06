@@ -2217,6 +2217,7 @@ static bool compile(struct Code *code, struct Program *program)
         } else if (stmt->lineno == 0) {
             /* No line number is an error in compile mode */
             compile_error("statement missing line number");
+            statement_free(stmt);
         } else {
             if (program->statements[stmt->lineno]) {
                 statement_free(program->statements[stmt->lineno]);
