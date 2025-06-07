@@ -2382,6 +2382,6 @@ char *dbi_get_line(DbiProgram prog, int lineno)
     assert(lineno < DBI_MAX_PROG_SIZE);
     struct Program *program = (struct Program *) prog;
     struct Statement *stmt = program->statements[lineno];
-    return stmt->line;
+    return stmt ? stmt->line : NULL;
 }
 
