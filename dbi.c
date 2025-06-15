@@ -251,13 +251,13 @@ static struct DbiObject *bstr_new(char *str, int len)
 
 static void bobj_copy(struct DbiObject *dest, struct DbiObject *src)
 {
+    if (dest->type == DBI_STR) {
+        free(dest->bstr);
+    }
     if (src->type == DBI_INT) {
         dest->type = DBI_INT;
         dest->bint = src->bint;
     } else if (src->type == DBI_STR) {
-        if (dest->type == DBI_STR) {
-            free(dest->bstr);
-        }
         dest->type = DBI_STR;
         int len = strlen(src->bstr);
         char *copy = malloc(len + 1);
