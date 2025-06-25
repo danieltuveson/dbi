@@ -1,11 +1,14 @@
-CFLAGS = -O2 -g -Wall -Wextra -fPIC
+CFLAGS = -O2 -g -Wall -Wextra
 objects = dbi.o
 
 dbi: $(objects) cli.o
 	$(CC) $(CFLAGS) $(objects) cli.o -o dbi
 
-libdbi.a: dbi.o
-	ar rc libdbi.a $(objects)
+dbi_sandboxed.o: dbi.c dbi.h
+	$(CC) $(CFLAGS) -DDBI_DISABLE_IO=1 -c dbi.c -o dbi_sandboxed.o
+
+libdbi.a: dbi_sandboxed.o
+	ar rc libdbi.a dbi_sandboxed.o
 
 install: dbi libdbi.a
 	@sudo mkdir -p /usr/local/lib

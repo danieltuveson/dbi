@@ -24,7 +24,9 @@
 
 // Toggle to disable all commands that use IO
 // Can be useful if embedding dbi into a non-cli application
+#ifndef DBI_DISABLE_IO
 #define DBI_DISABLE_IO 0
+#endif
 
 enum DbiType {
     DBI_INT,
