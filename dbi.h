@@ -73,7 +73,14 @@ DbiProgram dbi_program_new(void);
 void dbi_program_free(DbiProgram prog);
 
 // Executes program in runtime
+//
+// If program finishes with DBI_STATUS_YIELD, calling dbi_run again will
+// resume the program.
+//
+// Otherwise, if dbi_run is called the program will reset to the beginning
+// (but retaining any local variables that were set)
 enum DbiStatus dbi_run(DbiRuntime dbi, DbiProgram prog);
+
 DbiRuntime dbi_runtime_new(void);
 void dbi_runtime_free(DbiRuntime dbi);
 
@@ -82,6 +89,7 @@ void dbi_runtime_free(DbiRuntime dbi);
 void dbi_runtime_error(DbiRuntime dbi, const char *fmt, ...);
 
 // Get compilation / runtime errors as a string
+// Error will be set after dbi_run is called
 char *dbi_strerror(void);
 
 // Context can be used to pass data between C and dbi in foreign calls

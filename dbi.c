@@ -1477,6 +1477,25 @@ DbiRuntime dbi_runtime_new(void)
     return (DbiRuntime) runtime;
 }
 
+static void dbi_runtime_reset(struct Runtime *runtime)
+{
+    runtime->callstack_offset = 0;
+    runtime->lineno = 1;
+    runtime->ffi_argc = 0;
+    // struct DbiObject **vars;
+    // void *context;
+    // bool run_file;
+    // struct Statement *input_stmt;
+    // int lineno;
+    // char *filename;
+    // bool big_font;
+    // int callstack_offset;
+    // int *callstack;
+    // // Current args
+    // int ffi_argc;
+    // struct DbiObject **ffi_argv;
+}
+
 void dbi_runtime_free(DbiRuntime dbi)
 {
     struct Runtime *runtime = (struct Runtime *) dbi;
@@ -2330,8 +2349,14 @@ enum DbiStatus dbi_run(DbiRuntime dbi, DbiProgram prog)
     struct Runtime *runtime = (struct Runtime *) dbi;
     struct Program *program = (struct Program *) prog;
     struct Statement *stmt = statement_next(program->statements, runtime->lineno);
+    assert(stmt);
     enum DbiStatus status = execute_line(runtime, stmt, program, true);
-    return status;
+    if (status == DBI_STATUS_YIELD) {
+        return status;
+    } else {
+        dbi_runtime_reset(runtime);
+        return status;
+    }
 }
 
 int dbi_get_argc(DbiRuntime dbi)
