@@ -1,10 +1,13 @@
 CFLAGS = -O2 -g -Wall -Wextra
-objects = dbi.o
+objects = dbi.o aux.o
 
 dbi: $(objects) cli.o
 	$(CC) $(CFLAGS) $(objects) cli.o -o dbi
 
-dbi_sandboxed.o: dbi.c dbi.h
+aux.o: aux.c aux.h
+	$(CC) $(CFLAGS) -c aux.c -o aux.o
+
+dbi_sandboxed.o: aux.c aux.h dbi.c dbi.h
 	$(CC) $(CFLAGS) -DDBI_DISABLE_IO=1 -c dbi.c -o dbi_sandboxed.o
 
 libdbi.a: dbi_sandboxed.o

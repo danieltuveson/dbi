@@ -10,24 +10,10 @@
 #include <errno.h>
 #include "dbi.h"
 
-#if DBI_DISABLE_IO
-#define DBI_DISABLE_BIG 1
-#define DBI_DISABLE_SLEEP 1
-#else
-#define DBI_DISABLE_BIG 0
-#define DBI_DISABLE_SLEEP 0
-#endif
-
-#if !DBI_DISABLE_BIG
-#include "bigtext.c"
-#endif
-
-#if !DBI_DISABLE_SLEEP
-#include <unistd.h>
-#endif
-
 // Hardcoded since variables can only be A-Z 
 #define MAX_VARS 26
+
+#define IGNORE(arg) ((void)arg)
 
 // This is the only mutable global variable. It is just used for making error messages nice.
 static int global_lineno = 0;
@@ -75,12 +61,10 @@ char *dbi_strerror(void)
 // *******************************************************************
 
 enum Command {
-    UNDEFINED, PRINT,   IF,      GOTO,
+    UNDEFINED, IF,      GOTO,
     INPUT,     LET,     GOSUB,   RETURN,
-    CLEAR,     LIST,    RUN,     QUOTE,
-    REM,       LOAD,    SAVE,    BEEP,
-    SLEEP,     BIG,     SYSTEM,  HELP,
-    END
+    CLEAR,     LIST,    RUN,     REM,   
+    LOAD,      SAVE,    END
 };
 
 // Note: Other parts of the code assume that END is the largest value in this list.
@@ -95,39 +79,20 @@ struct CommandMapping {
 };
 
 struct CommandMapping command_map[] = {
-#if !DBI_DISABLE_IO
-    { "PRINT",  PRINT,  "print concatenated expression list",                 "PRINT expr-list" },
-#endif
     { "IF",     IF,     "conditionally execute statement",       "IF expr relop expr THEN stmt" },
     { "GOTO",   GOTO,   "jump to given line number",                          "GOTO expr" },
-#if !DBI_DISABLE_IO
-    { "INPUT",  INPUT,  "get user input(s) and assign to variable(s)",        "INPUT var-list" },
-#endif
     { "LET",    LET,    "set variable to expression",                         "LET var = expr" },
     { "GOSUB",  GOSUB,  "jump to given line number",                          "GOSUB expr" },
     { "RETURN", RETURN, "return to the line following the last GOSUB called", "RETURN" },
-#if !DBI_DISABLE_IO
-    { "CLEAR",  CLEAR,  "delete loaded code",                                 "CLEAR" },
-    { "LIST",   LIST,   "print out loaded code",                              "LIST" },
-#endif
     { "RUN",    RUN,    "execute loaded code",                                "RUN" },
     { "END",    END,    "end execution of program",                           "END" },
     { "REM",    REM,    "adds a comment",                                     "REM comment" },
 #if !DBI_DISABLE_IO
+    { "CLEAR",  CLEAR,  "delete loaded code",                                 "CLEAR" },
+    { "LIST",   LIST,   "print out loaded code",                              "LIST" },
+    { "INPUT",  INPUT,  "get user input(s) and assign to variable(s)",        "INPUT var-list" },
     { "LOAD",   LOAD,   "load code from file",                                "LOAD expr" },
     { "SAVE",   SAVE,   "save code to file",                                  "SAVE expr" },
-    { "BEEP",   BEEP,   "rings the bell",                                     "BEEP" },
-#endif
-#if !DBI_DISABLE_SLEEP
-    { "SLEEP",  SLEEP,  "sleeps for number of seconds",                   "SLEEP expr" },
-#endif
-#if !DBI_DISABLE_BIG
-    { "BIG",    BIG,    "toggles text embiggening",                       "BIG" },
-#endif
-#if !DBI_DISABLE_BIG
-    { "SYSTEM", SYSTEM, "run terminal command",                           "SYSTEM expr" },
-    { "QUOTE",  QUOTE,  "an inspirational quote",                         "QUOTE" },
-    { "HELP",   HELP,   "you just ran this",                              "HELP" },
 #endif
 };
 
@@ -178,8 +143,11 @@ static void print_line(void)
     putchar('\n');
 }
 
-static void print_help(void)
+static enum DbiStatus print_help(DbiRuntime dbi)
 {
+    int argc = dbi_get_argc(dbi);
+    assert(argc == 0);
+
     print_line();
     printf(" %-8s|  %-52s|  %-25s\n", "command", "description", "usage");
     for (int i = 0; i < 97; i++) {
@@ -208,6 +176,7 @@ static void print_help(void)
     printf("Source code is available at https://github.com/danieltuveson/dbi\n");
     printf("Happy hacking!\n");
     print_line();
+    return DBI_STATUS_GOOD;
 }
 
 static void print_intro(void)
@@ -216,13 +185,6 @@ static void print_intro(void)
     printf("press ctrl+d or type 'end' to exit\n");
     printf("type 'help' for a list of commands\n");
 }
-
-char *quote =
-"\n\t\"It is practically impossible to teach good programming to students\n"
-"\tthat have had a prior exposure to BASIC: as potential programmers\n"
-"\tthey are mentally mutilated beyond hope of regeneration.\"\n"
-"\t― Edsger Dijkstra\n";
-
 
 
 // *******************************************************************
@@ -521,8 +483,6 @@ enum Opcode {
     
     // Control flow / IO
     OP_PUSH,
-    OP_PRINT,
-    OP_PRINTLN,
     OP_JMP, // Jumps to line
     OP_JNZ, // Technnically this jumps to an opcode within a line, not an actual line
     OP_CALL,
@@ -537,14 +497,6 @@ enum Opcode {
     OP_END,
     OP_LOAD,
     OP_SAVE,
-    OP_HELP,
-#if !DBI_DISABLE_SLEEP
-    OP_SLEEP,
-#endif
-#if !DBI_DISABLE_BIG
-    OP_BIG,
-#endif
-    OP_SYSTEM,
     OP_FFI_CALL,
     OP_FFI_ARG,
 
@@ -957,18 +909,6 @@ static int compile_print_like(char *input, struct Memory *memory, struct Bytecod
     return input - init_input;
 }
 
-#if !DBI_DISABLE_IO
-static int compile_print(char *input, struct Memory *memory, struct Bytecode *bytecode)
-{
-    int char_count = compile_print_like(input, memory, bytecode, OP_PRINT, -1);
-    // Kind of hacky, but whatever
-    if (char_count) {
-        bytecode->array[bytecode->index - 1] = OP_PRINTLN;
-    }
-    return char_count;
-}
-#endif
-
 static int parse_relop(char *input, enum Opcode *op)
 {
     if (*input == '<') {
@@ -1202,7 +1142,7 @@ static int compile_statement(char *input, struct ForeignCall *foreign_calls,
 
     // Parse based on command
     int mem_loc;
-    if (command == SAVE || command == LOAD || command == SLEEP || command == SYSTEM) {
+    if (command == SAVE || command == LOAD) {
         chars_parsed = compile_expr(input, memory, bytecode);
         if (!chars_parsed) {
             return 0;
@@ -1210,15 +1150,6 @@ static int compile_statement(char *input, struct ForeignCall *foreign_calls,
         input += chars_parsed;
     }
     switch (command) {
-#if !DBI_DISABLE_IO
-        case PRINT:
-            chars_parsed = compile_print(input, memory, bytecode);
-            if (!chars_parsed) {
-                return 0;
-            }
-            input += chars_parsed;
-            break;
-#endif
         case IF:
             chars_parsed = compile_if(input, foreign_calls, memory, bytecode, lineno, command_ptr);
             if (!chars_parsed) {
@@ -1286,42 +1217,6 @@ static int compile_statement(char *input, struct ForeignCall *foreign_calls,
             break;
         case SAVE:
             bytecode_add(bytecode, OP_SAVE);
-            break;
-        case QUOTE:
-            mem_loc = memory_add_str(memory, quote, strlen(quote));
-            if (mem_loc == -1) {
-                return 0;
-            }
-            bytecode_add(bytecode, OP_PUSH);
-            bytecode_add(bytecode, mem_loc);
-            bytecode_add(bytecode, OP_PRINTLN);
-            break;
-        case BEEP:
-            mem_loc = memory_add_str(memory, "\a", strlen(quote));
-            if (mem_loc == -1) {
-                return 0;
-            }
-            bytecode_add(bytecode, OP_PUSH);
-            bytecode_add(bytecode, mem_loc);
-            bytecode_add(bytecode, OP_PRINTLN);
-            break;
-#endif
-#if !DBI_DISABLE_SLEEP
-        case SLEEP:
-            bytecode_add(bytecode, OP_SLEEP);
-            break;
-#endif
-#if !DBI_DISABLE_BIG
-        case BIG:
-            bytecode_add(bytecode, OP_BIG);
-            break;
-#endif
-#if !DBI_DISABLE_IO
-        case SYSTEM:
-            bytecode_add(bytecode, OP_SYSTEM);
-            break;
-        case HELP:
-            bytecode_add(bytecode, OP_HELP);
             break;
 #endif
         default:
@@ -1482,18 +1377,6 @@ static void dbi_runtime_reset(struct Runtime *runtime)
     runtime->callstack_offset = 0;
     runtime->lineno = 1;
     runtime->ffi_argc = 0;
-    // struct DbiObject **vars;
-    // void *context;
-    // bool run_file;
-    // struct Statement *input_stmt;
-    // int lineno;
-    // char *filename;
-    // bool big_font;
-    // int callstack_offset;
-    // int *callstack;
-    // // Current args
-    // int ffi_argc;
-    // struct DbiObject **ffi_argv;
 }
 
 void dbi_runtime_free(DbiRuntime dbi)
@@ -1533,54 +1416,6 @@ void dbi_runtime_error(DbiRuntime dbi, const char *fmt, ...)
     compile_error(__VA_ARGS__);\
     global_lineno = old_lineno;\
 } while (0)
-
-static void bobj_print(struct DbiObject *obj, struct DbiObject **vars, bool big_font)
-{
-    if (obj->type == DBI_VAR) {
-        obj = vars[obj->bvar];
-    }
-#if !DBI_DISABLE_BIG
-    if (big_font) {
-        size_t len;
-        char *strbuff;
-        if (obj->type == DBI_INT) {
-            len = 3 * sizeof(int) + 2;
-            strbuff = calloc(len, 1);
-            snprintf(strbuff, len, "%d", obj->bint);
-            print_big(strbuff);
-            free(strbuff);
-
-        } else if (obj->type == DBI_STR) {
-            len = strlen(obj->bstr) + 1;
-            strbuff = calloc(len, 1);
-            snprintf(strbuff, len, "%s", obj->bstr);
-            print_big(strbuff);
-            free(strbuff);
-
-        } else {
-            runtime_error(-1, "Internal runtime error: unknown type in PRINT statement");
-        }
-    } else {
-#else
-        (void) big_font; // Ignore parameter
-#endif
-        if (obj->type == DBI_INT) {
-            printf("%d", obj->bint);
-        } else if (obj->type == DBI_STR) {
-            printf("%s", obj->bstr);
-        } else {
-            runtime_error(-1, "Internal runtime error: unknown type in PRINT statement");
-#if !DBI_DISABLE_BIG
-        }
-#endif
-    }
-}
-
-static void bobj_println(struct DbiObject *obj, struct DbiObject **vars, bool big_font)
-{
-    bobj_print(obj, vars, big_font);
-    printf("\n");
-}
 
 // Compile input into a bunch of OP_LETs - kinda hacky but I can't think of a better way
 static struct Statement *execute_input(struct Statement *stmt, int var_count, uint8_t *var_list)
@@ -1779,14 +1614,6 @@ static enum DbiStatus execute_line(
                 }
                 push(stmt->memory->array[mem_loc]);
                 break;
-            case OP_PRINT:
-                obj = pop();
-                bobj_print(obj, vars, runtime->big_font);
-                break;
-            case OP_PRINTLN:
-                obj = pop();
-                bobj_println(obj, vars, runtime->big_font);
-                break;
             case OP_INPUT:
                 count = stmt->bytecode->array[++ip];
 
@@ -1900,30 +1727,6 @@ static enum DbiStatus execute_line(
                     return DBI_STATUS_ERROR;
                 }
                 break;
-#if !DBI_DISABLE_SLEEP
-            case OP_SLEEP:
-                obj = pop();
-                expect_int("argument for SLEEP command");
-                sleep(obj->bint);
-                break;
-#endif
-#if !DBI_DISABLE_BIG
-            case OP_BIG:
-                runtime->big_font = !runtime->big_font;
-                break;
-#endif
-            case OP_SYSTEM:
-                obj = pop();
-                expect_string("argument for SYSTEM command");
-                int err = system(obj->bstr);
-                if (err == -1) {
-                    runtime_error(stmt->lineno, "%s", strerror(errno));
-                    return DBI_STATUS_ERROR;
-                }
-                break;
-            case OP_HELP:
-                print_help();
-                break;
             case OP_ADD:
                 math_boilerplate();
                 push_int(lnum + rnum);
@@ -2025,6 +1828,25 @@ void temps_init(char *input, struct Memory *temp_memory, struct Bytecode *temp_b
     global_lineno = -1;
 }
 
+static void foreign_call_table_init(struct Program *program)
+{
+    int count = 0;
+    struct ForeignCall *foreign_calls = program->foreign_calls;
+    while (foreign_calls != NULL) {
+        count++;
+        foreign_calls = foreign_calls->next;
+    }
+    if (count == 0) {
+        return;
+    }
+    program->foreign_call_table = calloc(count, sizeof(*program->foreign_call_table));
+    foreign_calls = program->foreign_calls;
+    for (int i = 0; i < count; i++) {
+        program->foreign_call_table[i] = foreign_calls->call;
+        foreign_calls = foreign_calls->next;
+    }
+}
+
 // Loads provided file then executes RUN command
 // If filename is NULL it will drop into the REPL and not execute RUN
 bool dbi_repl(DbiProgram prog, char *input_file_name)
@@ -2045,6 +1867,13 @@ bool dbi_repl(DbiProgram prog, char *input_file_name)
         run_file = false;
         print_intro();
     }
+    
+    // Any REPL-specific items should go here
+    assert(!program->has_compiled);
+    dbi_register_command_with_info(prog, "HELP", print_help, 0, "you just ran this", "HELP");
+
+    foreign_call_table_init(program);
+    program->has_compiled = true;
 
     char input[DBI_MAX_LINE_LENGTH];
 
@@ -2247,25 +2076,6 @@ static bool compile(struct Code *code, struct Program *program)
     return global_err_msg[0] == '\0';
 }
 
-static void foreign_call_table_init(struct Program *program)
-{
-    int count = 0;
-    struct ForeignCall *foreign_calls = program->foreign_calls;
-    while (foreign_calls != NULL) {
-        count++;
-        foreign_calls = foreign_calls->next;
-    }
-    if (count == 0) {
-        return;
-    }
-    program->foreign_call_table = calloc(count, sizeof(*program->foreign_call_table));
-    foreign_calls = program->foreign_calls;
-    for (int i = 0; i < count; i++) {
-        program->foreign_call_table[i] = foreign_calls->call;
-        foreign_calls = foreign_calls->next;
-    }
-}
-
 static bool compile_code(DbiProgram prog, struct Code *code)
 {
     if (!prog) {
@@ -2336,10 +2146,18 @@ void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int 
         if (fc_temp->next == NULL) {
             break;
         }
-        fc_temp = program->foreign_calls->next;
+        fc_temp = fc_temp->next;
     }
     fc->extended_command_code = LAST_COMMAND + count;
     fc_temp->next = fc;
+}
+
+void dbi_register_command_with_info(DbiProgram prog, char *name, DbiForeignCall call, int argc, char *docstring, char *example)
+{
+    // TODO: Make it able to add docstrings / comments to help screen
+    IGNORE(docstring);
+    IGNORE(example);
+    dbi_register_command(prog, name, call, argc);
 }
 
 // Executes program in runtime

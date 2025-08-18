@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include "aux.h"
 #include "dbi.h"
 
 // Could just as easily replace this with a `!`, but that gets a little confusing
@@ -10,6 +11,8 @@
 int main(int argc, char *argv[])
 {
     DbiProgram prog = dbi_program_new();
+    aux_register_commands(prog);
+
     int ret = EXIT_FAILURE;
     if (argc < 2) {
         ret = status(dbi_repl(prog, NULL));

@@ -62,6 +62,7 @@ typedef enum DbiStatus (*DbiForeignCall)(DbiRuntime dbi);
 // Command names *must* be unique and may not conflict with builtin command names
 // `doc` can contain up to 50 characters of documentation text.
 void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int argc);
+void dbi_register_command_with_info(DbiProgram prog, char *name, DbiForeignCall call, int argc, char *docstring, char *example);
 
 // Note: all C function commands must be registered before compilation.
 //       dbi_compile_* functions can be called multiple times with different inputs. If the line
