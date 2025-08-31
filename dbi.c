@@ -143,42 +143,6 @@ static void print_line(void)
     putchar('\n');
 }
 
-static enum DbiStatus print_help(DbiRuntime dbi)
-{
-    int argc = dbi_get_argc(dbi);
-    assert(argc == 0);
-
-    print_line();
-    printf(" %-8s|  %-52s|  %-25s\n", "command", "description", "usage");
-    for (int i = 0; i < 97; i++) {
-        if (i == 9 || i == 64) {
-            putchar('+');
-        } else {
-            putchar('-');
-        }
-    }
-    putchar('\n');
-    for (int i = 0; i < command_map_size; i++) {
-        struct CommandMapping cm = command_map[i];
-        if (cm.command != UNDEFINED) {
-            printf(" %-8s|  %-52s|  %-25s\n", cm.str, cm.helpstr, cm.helpex);
-        }
-    }
-    print_line();
-    for (int i = 0; i < grammar_map_size; i++) {
-        struct GrammarMapping gm = grammar_map[i];
-        printf("%-11s  ::=  %s\n", gm.symbol, gm.expression);
-    }
-    print_line();
-    printf("This BASIC interpreter is loosely based on Dennis Allison's Tiny BASIC\n");
-    printf("Most of the above grammar is taken from page 9 of Dr. Dobb's Journal:\n"
-            "https://archive.org/download/dr_dobbs_journal_vol_01/dr_dobbs_journal_vol_01.pdf\n");
-    printf("Source code is available at https://github.com/danieltuveson/dbi\n");
-    printf("Happy hacking!\n");
-    print_line();
-    return DBI_STATUS_GOOD;
-}
-
 static void print_intro(void)
 {
     printf("dan's basic interpreter - Copyright (C) 2025 Daniel Tuveson\n");
@@ -437,6 +401,8 @@ struct ForeignCall {
     char *name;
     int extended_command_code; // Numeric value of command, as if it were in enum Command
     DbiForeignCall call;
+    char *docstring;
+    char *example;
     struct ForeignCall *next;
 };
 
@@ -1329,9 +1295,10 @@ struct Runtime {
     struct Statement *input_stmt;
     int lineno;
     char *filename;
-    bool big_font;
     int callstack_offset;
     int *callstack;
+    // Reference to current program being executed
+    struct Program *program;
     // Current args
     int ffi_argc;
     struct DbiObject **ffi_argv;
@@ -1370,6 +1337,13 @@ DbiRuntime dbi_runtime_new(void)
 
     runtime->callstack = calloc(DBI_MAX_CALL_STACK, sizeof(*runtime->callstack));
     return (DbiRuntime) runtime;
+}
+
+static DbiRuntime runtime_new_with_program(struct Program *program)
+{
+    struct Runtime *runtime = (struct Runtime *)dbi_runtime_new();
+    runtime->program = program;
+    return (DbiRuntime)runtime;
 }
 
 static void dbi_runtime_reset(struct Runtime *runtime)
@@ -1847,6 +1821,48 @@ static void foreign_call_table_init(struct Program *program)
     }
 }
 
+static enum DbiStatus print_help(DbiRuntime dbi)
+{
+    int argc = dbi_get_argc(dbi);
+    assert(argc == 0);
+
+    print_line();
+    printf(" %-8s|  %-52s|  %-25s\n", "command", "description", "usage");
+    for (int i = 0; i < 97; i++) {
+        if (i == 9 || i == 64) {
+            putchar('+');
+        } else {
+            putchar('-');
+        }
+    }
+    putchar('\n');
+    for (int i = 0; i < command_map_size; i++) {
+        struct CommandMapping cm = command_map[i];
+        if (cm.command != UNDEFINED) {
+            printf(" %-8s|  %-52s|  %-25s\n", cm.str, cm.helpstr, cm.helpex);
+        }
+    }
+    struct Program *program = ((struct Runtime *)dbi)->program;
+    struct ForeignCall *fc = program->foreign_calls;
+    while (fc) {
+        printf(" %-8s|  %-52s|  %-25s\n", fc->name, fc->docstring, fc->example);
+        fc = fc->next;
+    }
+    print_line();
+    for (int i = 0; i < grammar_map_size; i++) {
+        struct GrammarMapping gm = grammar_map[i];
+        printf("%-11s  ::=  %s\n", gm.symbol, gm.expression);
+    }
+    print_line();
+    printf("This BASIC interpreter is loosely based on Dennis Allison's Tiny BASIC\n");
+    printf("Most of the above grammar is taken from page 9 of Dr. Dobb's Journal:\n"
+            "https://archive.org/download/dr_dobbs_journal_vol_01/dr_dobbs_journal_vol_01.pdf\n");
+    printf("Source code is available at https://github.com/danieltuveson/dbi\n");
+    printf("Happy hacking!\n");
+    print_line();
+    return DBI_STATUS_GOOD;
+}
+
 // Loads provided file then executes RUN command
 // If filename is NULL it will drop into the REPL and not execute RUN
 bool dbi_repl(DbiProgram prog, char *input_file_name)
@@ -1885,7 +1901,7 @@ bool dbi_repl(DbiProgram prog, char *input_file_name)
 
     bool input_error = false;
 
-    DbiRuntime dbi = dbi_runtime_new();
+    DbiRuntime dbi = runtime_new_with_program(program);
     struct Runtime *runtime = (struct Runtime *) dbi;
 
     while (true) {
@@ -2115,7 +2131,7 @@ bool dbi_compile_string(DbiProgram prog, char *text)
     return ret;
 }
 
-void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int argc)
+void register_command(DbiProgram prog, char *name, DbiForeignCall call, int argc, char *docstring, char *example)
 {
     assert(argc >= -1);
     struct Program *program = (struct Program *) prog;
@@ -2123,6 +2139,8 @@ void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int 
     struct ForeignCall *fc = malloc(sizeof(*fc));
     fc->argc = argc;
     fc->name = name;
+    fc->docstring = docstring;
+    fc->example = example;
     // Commands must be all caps, no other letters
     while (*name != '\0') {
         if (!(*name >= 'A' && *name <= 'Z')) {
@@ -2152,12 +2170,14 @@ void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int 
     fc_temp->next = fc;
 }
 
+void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int argc)
+{
+    register_command(prog, name, call, argc, NULL, NULL);
+}
+
 void dbi_register_command_with_info(DbiProgram prog, char *name, DbiForeignCall call, int argc, char *docstring, char *example)
 {
-    // TODO: Make it able to add docstrings / comments to help screen
-    IGNORE(docstring);
-    IGNORE(example);
-    dbi_register_command(prog, name, call, argc);
+    register_command(prog, name, call, argc, docstring, example);
 }
 
 // Executes program in runtime
@@ -2166,12 +2186,14 @@ enum DbiStatus dbi_run(DbiRuntime dbi, DbiProgram prog)
     memset(global_err_msg, 0, DBI_MAX_ERROR);
     struct Runtime *runtime = (struct Runtime *) dbi;
     struct Program *program = (struct Program *) prog;
+    runtime->program = program;
     struct Statement *stmt = statement_next(program->statements, runtime->lineno);
     assert(stmt);
     enum DbiStatus status = execute_line(runtime, stmt, program, true);
     if (status == DBI_STATUS_YIELD) {
         return status;
     } else {
+        // Allows runtime to be re-used if program has finished
         dbi_runtime_reset(runtime);
         return status;
     }
