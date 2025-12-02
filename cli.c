@@ -26,6 +26,8 @@ int main(int argc, char *argv[])
             ret = status(dbi_compile_file(prog, argv[2]));
             if (ret == EXIT_FAILURE) {
                 printf("%s", dbi_strerror());
+            } else {
+                dbi_print_compiled(prog);
             }
         } else if (strcmp(argv[1], "-e") == 0) {
             ret = status(dbi_compile_file(prog, argv[2]));

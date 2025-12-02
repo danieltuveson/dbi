@@ -112,5 +112,8 @@ bool dbi_repl(DbiProgram prog, char *input_file_name);
 // Get text of line at given number
 char *dbi_get_line(DbiProgram prog, int lineno);
 
+// Print out human readable bytecode of program
+void dbi_print_compiled(DbiProgram prog);
+
 #endif
 

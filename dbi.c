@@ -64,7 +64,7 @@ enum Command {
     UNDEFINED, IF,      GOTO,
     INPUT,     LET,     GOSUB,   RETURN,
     CLEAR,     LIST,    RUN,     REM,   
-    LOAD,      SAVE,    END
+    LOAD,      SAVE,    LISTB,   END
 };
 
 // Note: Other parts of the code assume that END is the largest value in this list.
@@ -90,6 +90,7 @@ struct CommandMapping command_map[] = {
 #if !DBI_DISABLE_IO
     { "CLEAR",  CLEAR,  "delete loaded code",                                 "CLEAR" },
     { "LIST",   LIST,   "print out loaded code",                              "LIST" },
+    { "LISTB",  LISTB,  "print out loaded bytecode",                          "LISTB" },
     { "INPUT",  INPUT,  "get user input(s) and assign to variable(s)",        "INPUT var-list" },
     { "LOAD",   LOAD,   "load code from file",                                "LOAD expr" },
     { "SAVE",   SAVE,   "save code to file",                                  "SAVE expr" },
@@ -150,6 +151,95 @@ static void print_intro(void)
     printf("type 'help' for a list of commands\n");
 }
 
+// *******************************************************************
+// ***************************** Opcodes *****************************
+// *******************************************************************
+
+enum Opcode {
+    // No-op
+    OP_NO,
+    
+    // Control flow / IO
+    OP_PUSH,
+    OP_JMP, // Jumps to line
+    OP_JNZ, // Technnically this jumps to an opcode within a line, not an actual line
+    OP_CALL,
+    OP_INPUT,
+    OP_LET,
+    OP_RETURN,
+
+    // Meta programming operations
+    OP_CLEAR,
+    OP_LIST,
+    OP_LISTB,
+    OP_RUN,
+    OP_END,
+    OP_LOAD,
+    OP_SAVE,
+    OP_FFI_CALL,
+    OP_FFI_ARG,
+
+    // Comparison operators
+    OP_LT,
+    OP_GT,
+    OP_EQ,
+    OP_NEQ,
+    OP_LEQ,
+    OP_GEQ,
+
+    // Math operators
+    OP_ADD,
+    OP_SUB,
+    OP_MUL,
+    OP_DIV
+};
+
+struct OperatorMap {
+    enum Opcode op;
+    char *str;
+};
+
+struct OperatorMap op_map[] = {
+    { OP_NO,       "NOOP" },
+    { OP_PUSH,     "PUSH" },
+    { OP_JMP,      "JMP" },
+    { OP_JNZ,      "JNZ" },
+    { OP_CALL,     "CALL" },
+    { OP_INPUT,    "INPUT" },
+    { OP_LET,      "LET" },
+    { OP_RETURN,   "RETURN" },
+    { OP_CLEAR,    "CLEAR" },
+    { OP_LIST,     "LIST" },
+    { OP_LISTB,    "LISTB" },
+    { OP_RUN,      "RUN" },
+    { OP_END,      "END" },
+    { OP_LOAD,     "LOAD" },
+    { OP_SAVE,     "SAVE" },
+    { OP_FFI_CALL, "FFI_CALL" },
+    { OP_FFI_ARG,  "FFI_ARG" },
+    { OP_LT,       "LT" },
+    { OP_GT,       "GT" },
+    { OP_EQ,       "EQ" },
+    { OP_NEQ,      "NEQ" },
+    { OP_LEQ,      "LEQ" },
+    { OP_GEQ,      "GEQ" },
+    { OP_ADD,      "ADD" },
+    { OP_SUB,      "SUB" },
+    { OP_MUL,      "MUL" },
+    { OP_DIV,      "DIV" },
+};
+
+int op_map_size = sizeof(op_map) / sizeof(*op_map);
+
+static char *op_to_str(enum Opcode op)
+{
+    for (int i = 0; i < op_map_size; i++) {
+        if (op_map[i].op == op) {
+            return op_map[i].str;
+        }
+    }
+    return NULL;
+}
 
 // *******************************************************************
 // ************************** Basic Objects **************************
@@ -364,6 +454,49 @@ static void program_list(struct Statement **program)
     }
 }
 
+static void program_listb(struct Statement **program)
+{
+    bool first = true;
+    for (int i = 0; i < DBI_MAX_PROG_SIZE; i++) {
+        struct Statement *stmt = program[i];
+        if (stmt) {
+            if (first) {
+                first = false;
+            } else {
+                printf("\n");
+            }
+            for (int j = 0; j < stmt->bytecode->index; j++) {
+                printf("%04d:%04d ", i, j);
+                uint8_t code = stmt->bytecode->array[j];
+                printf("%s", op_to_str(code));
+                if ((code == OP_PUSH || code == OP_LET || code == OP_INPUT) && j + 1 < stmt->bytecode->index) {
+                    uint8_t arg = stmt->bytecode->array[++j];
+                    if (code == OP_PUSH) {
+                        assert(arg < stmt->memory->index);
+                        struct DbiObject *obj = stmt->memory->array[arg];
+                        if (obj->type == DBI_INT) {
+                            printf(" %d", obj->bint);
+                        } else if (obj->type == DBI_STR) {
+                            printf(" \"%s\"", obj->bstr);
+                        } else if (obj->type == DBI_VAR) {
+                            printf(" %c", stmt->bytecode->array[j] + 'A');
+                        } else {
+                            assert(false);
+                        }
+                    } else if (code == OP_LET) {
+                        printf(" %c", arg + 'A');
+                    } else {
+                        for (int k = 0; k < arg; k++) {
+                            printf(" %c", stmt->bytecode->array[++j] + 'A');
+                        }
+                    }
+                }
+                printf("\n");
+            }
+        }
+    }
+}
+
 static int program_save(struct Statement **program, char *filename)
 {
     FILE *file = fopen(filename, "w+");
@@ -442,44 +575,6 @@ void dbi_program_free(DbiProgram prog)
     free(program->statements);
     free(program);
 }
-
-enum Opcode {
-    // No-op
-    OP_NO,
-    
-    // Control flow / IO
-    OP_PUSH,
-    OP_JMP, // Jumps to line
-    OP_JNZ, // Technnically this jumps to an opcode within a line, not an actual line
-    OP_CALL,
-    OP_INPUT,
-    OP_LET,
-    OP_RETURN,
-
-    // Meta programming operations
-    OP_CLEAR,
-    OP_LIST,
-    OP_RUN,
-    OP_END,
-    OP_LOAD,
-    OP_SAVE,
-    OP_FFI_CALL,
-    OP_FFI_ARG,
-
-    // Comparison operators
-    OP_LT,
-    OP_GT,
-    OP_EQ,
-    OP_NEQ,
-    OP_LEQ,
-    OP_GEQ,
-
-    // Math operators
-    OP_ADD,
-    OP_SUB,
-    OP_MUL,
-    OP_DIV
-};
 
 static void ignore_whitespace(char **input_ptr)
 {
@@ -1166,6 +1261,9 @@ static int compile_statement(char *input, struct ForeignCall *foreign_calls,
         case LIST:
             bytecode_add(bytecode, OP_LIST);
             break;
+        case LISTB:
+            bytecode_add(bytecode, OP_LISTB);
+            break;
 #endif
         case RUN:
             bytecode_add(bytecode, OP_RUN);
@@ -1675,6 +1773,9 @@ static enum DbiStatus execute_line(
                 break;
             case OP_LIST:
                 program_list(statements);
+                break;
+            case OP_LISTB:
+                program_listb(statements);
                 break;
             case OP_RUN:
                 stmt = statement_next(statements, 0);
@@ -2248,5 +2349,12 @@ char *dbi_get_line(DbiProgram prog, int lineno)
     struct Program *program = (struct Program *) prog;
     struct Statement *stmt = program->statements[lineno];
     return stmt ? stmt->line : NULL;
+}
+
+void dbi_print_compiled(DbiProgram prog)
+{
+    struct Program *program = (struct Program *) prog;
+    assert(program->has_compiled);
+    program_listb(program->statements);
 }
 
