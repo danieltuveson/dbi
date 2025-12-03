@@ -191,7 +191,8 @@ enum Opcode {
     OP_ADD,
     OP_SUB,
     OP_MUL,
-    OP_DIV
+    OP_DIV,
+    OP_MOD,
 };
 
 struct OperatorMap {
@@ -227,6 +228,7 @@ struct OperatorMap op_map[] = {
     { OP_SUB,      "SUB" },
     { OP_MUL,      "MUL" },
     { OP_DIV,      "DIV" },
+    { OP_MOD,      "MOD" },
 };
 
 int op_map_size = sizeof(op_map) / sizeof(*op_map);
@@ -612,7 +614,7 @@ static bool prefix_stmt_end(char c)
 
 static bool prefix_op(char c)
 {
-    return c == '+' || c == '-' || c == '*' || c == '/';
+    return c == '+' || c == '-' || c == '*' || c == '/' || c == '%';
 }
 
 // returns number of chars consumed
@@ -770,6 +772,8 @@ static void compile_op(struct Bytecode *bytecode, char op)
         bytecode_add(bytecode, OP_MUL);
     } else if (op == '/') {
         bytecode_add(bytecode, OP_DIV);
+    } else if (op == '%') {
+        bytecode_add(bytecode, OP_MOD);
     } else  if (op == '+') {
         bytecode_add(bytecode, OP_ADD);
     } else if (op == '-') {
@@ -844,7 +848,7 @@ static int compile_expr(char *input, struct Memory *memory, struct Bytecode *byt
                 printf("peek: %c\n", peek());
 #endif
                 op = peek();
-                if (*input == '*' || *input == '/') {
+                if (*input == '*' || *input == '/' || *input == '%') {
                     while (op != '+' && op != '-' && op != '(' && op != 0) {
                         compile_op(bytecode, op);
                         pop();
@@ -1821,6 +1825,14 @@ static enum DbiStatus execute_line(
                     return DBI_STATUS_ERROR;
                 }
                 push_int(lnum / rnum);
+                break;
+            case OP_MOD:
+                math_boilerplate();
+                if (rnum == 0) {
+                    runtime_error(stmt->lineno, "modulus by zero");
+                    return DBI_STATUS_ERROR;
+                }
+                push_int(lnum % rnum);
                 break;
             case OP_LT:
                 math_boilerplate();
