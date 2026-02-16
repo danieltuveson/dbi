@@ -10,13 +10,10 @@
 #include <errno.h>
 #include "dbi.h"
 
-// Hardcoded since variables can only be A-Z 
-#define MAX_VARS 26
-
 #define IGNORE(arg) ((void)arg)
 
 // This is the only mutable global variable. It is just used for making error messages nice.
-static int global_lineno = 0;
+static long global_lineno = 0;
 
 // I lied, this is also a mutable global
 static char global_err_msg[DBI_MAX_ERROR] = {0};
@@ -27,7 +24,7 @@ static void compile_error(const char *fmt, ...)
     if (global_lineno <= 0) {
         len += snprintf(global_err_msg + len, DBI_MAX_ERROR - len, "Error: ");
     } else {
-        len += snprintf(global_err_msg + len, DBI_MAX_ERROR - len, "Error at line %d: ",
+        len += snprintf(global_err_msg + len, DBI_MAX_ERROR - len, "Error at line %ld: ",
                 global_lineno);
     }
     va_list args;
@@ -178,6 +175,7 @@ enum Opcode {
     OP_SAVE,
     OP_FFI_CALL,
     OP_FFI_ARG,
+    OP_FFI_MACRO_ARG,
 
     // Comparison operators
     OP_LT,
@@ -247,7 +245,7 @@ static char *op_to_str(enum Opcode op)
 // ************************** Basic Objects **************************
 // *******************************************************************
 
-static struct DbiObject *bint_new(int i)
+static struct DbiObject *bint_new(long i)
 {
     struct DbiObject *obj = malloc(sizeof(*obj));
     obj->type = DBI_INT;
@@ -255,7 +253,7 @@ static struct DbiObject *bint_new(int i)
     return obj;
 }
 
-static struct DbiObject *bstr_new(char *str, int len)
+static struct DbiObject *bstr_new(char *str, long len)
 {
     char *copy = malloc(len + 1);
     memcpy(copy, str, len);
@@ -277,11 +275,14 @@ static void bobj_copy(struct DbiObject *dest, struct DbiObject *src)
         dest->bint = src->bint;
     } else if (src->type == DBI_STR) {
         dest->type = DBI_STR;
-        int len = strlen(src->bstr);
+        long len = strlen(src->bstr);
         char *copy = malloc(len + 1);
         memcpy(copy, src->bstr, len);
         copy[len] = '\0';
         dest->bstr = copy;
+    } else if (src->type == DBI_VAR) {
+        dest->type = DBI_VAR;
+        dest->bvar = src->bvar;
     } else {
         assert(0);
     }
@@ -333,7 +334,7 @@ static int memory_add(struct Memory *memory, struct DbiObject *obj)
 }
 
 // On success returns memory location where object was placed
-static int memory_add_int(struct Memory *memory, int i)
+static int memory_add_int(struct Memory *memory, long i)
 {
     if (!memory_check(memory)) {
         return -1;
@@ -341,7 +342,7 @@ static int memory_add_int(struct Memory *memory, int i)
     return memory_add(memory, bint_new(i));
 }
 
-static int memory_add_str(struct Memory *memory, char *str, int len)
+static int memory_add_str(struct Memory *memory, char *str, long len)
 {
     if (!memory_check(memory)) {
         return -1;
@@ -380,14 +381,14 @@ static void bytecode_add(struct Bytecode *bytecode, uint8_t byte)
 // *******************************************************************
 
 struct Statement {
-    int lineno;
+    long lineno;
     char *line;
     // list of DbiObjects used by statement
     struct Memory *memory;
     struct Bytecode *bytecode;
 };
 
-static struct Statement *statement_new(int lineno, char *input, struct Memory *memory,
+static struct Statement *statement_new(long lineno, char *input, struct Memory *memory,
         struct Bytecode *bytecode)
 {
     struct Statement *stmt = malloc(sizeof(*stmt));
@@ -437,7 +438,7 @@ static void statement_free(struct Statement *stmt)
 
 static void program_clear(struct Statement **program)
 {
-    for (int i = 0; i < DBI_MAX_PROG_SIZE; i++) {
+    for (long i = 0; i < DBI_MAX_PROG_SIZE; i++) {
         struct Statement *stmt = program[i];
         if (stmt) {
             statement_free(stmt);
@@ -448,7 +449,7 @@ static void program_clear(struct Statement **program)
 
 static void program_list(struct Statement **program)
 {
-    for (int i = 0; i < DBI_MAX_PROG_SIZE; i++) {
+    for (long i = 0; i < DBI_MAX_PROG_SIZE; i++) {
         struct Statement *stmt = program[i];
         if (stmt) {
             printf("%s", stmt->line);
@@ -459,7 +460,7 @@ static void program_list(struct Statement **program)
 static void program_listb(struct Statement **program)
 {
     bool first = true;
-    for (int i = 0; i < DBI_MAX_PROG_SIZE; i++) {
+    for (long i = 0; i < DBI_MAX_PROG_SIZE; i++) {
         struct Statement *stmt = program[i];
         if (stmt) {
             if (first) {
@@ -468,7 +469,7 @@ static void program_listb(struct Statement **program)
                 printf("\n");
             }
             for (int j = 0; j < stmt->bytecode->index; j++) {
-                printf("%04d:%04d ", i, j);
+                printf("%04ld:%04d ", i, j);
                 uint8_t code = stmt->bytecode->array[j];
                 printf("%s", op_to_str(code));
                 if ((code == OP_PUSH || code == OP_LET || code == OP_INPUT) && j + 1 < stmt->bytecode->index) {
@@ -477,7 +478,7 @@ static void program_listb(struct Statement **program)
                         assert(arg < stmt->memory->index);
                         struct DbiObject *obj = stmt->memory->array[arg];
                         if (obj->type == DBI_INT) {
-                            printf(" %d", obj->bint);
+                            printf(" %ld", obj->bint);
                         } else if (obj->type == DBI_STR) {
                             printf(" \"%s\"", obj->bstr);
                         } else if (obj->type == DBI_VAR) {
@@ -499,13 +500,13 @@ static void program_listb(struct Statement **program)
     }
 }
 
-static int program_save(struct Statement **program, char *filename)
+static long program_save(struct Statement **program, char *filename)
 {
     FILE *file = fopen(filename, "w+");
     if (!file) {
         return 0;
     }
-    for (int i = 0; i < DBI_MAX_PROG_SIZE; i++) {
+    for (long i = 0; i < DBI_MAX_PROG_SIZE; i++) {
         struct Statement *stmt = program[i];
         if (stmt) {
             fprintf(file, "%s", stmt->line);
@@ -515,9 +516,9 @@ static int program_save(struct Statement **program, char *filename)
     return 1;
 }
 
-static struct Statement *statement_next(struct Statement **program, int lineno)
+static struct Statement *statement_next(struct Statement **program, long lineno)
 {
-    for (int i = lineno; i < DBI_MAX_PROG_SIZE; i++) {
+    for (long i = lineno; i < DBI_MAX_PROG_SIZE; i++) {
         struct Statement *stmt = program[i];
         if (stmt) {
             return stmt;
@@ -532,6 +533,7 @@ static struct Statement *statement_next(struct Statement **program, int lineno)
 
 struct ForeignCall {
     enum DbiStatus status;
+    bool is_macro;
     int argc;
     char *name;
     int extended_command_code; // Numeric value of command, as if it were in enum Command
@@ -619,17 +621,17 @@ static bool prefix_op(char c)
 
 // returns number of chars consumed
 // -1 on error
-static int parse_lineno(char *input, int *lineno)
+static long parse_lineno(char *input, long *lineno)
 {
     if (!isdigit(*input)) {
         *lineno = 0;
         return 0;
     }
     *lineno = 0;
-    int i = 0;
+    long i = 0;
     while (isdigit(input[i])) {
         *lineno = *lineno * 10 + input[i] - '0';
-        if (i > (int) sizeof(int) || *lineno >= DBI_MAX_PROG_SIZE) {
+        if (i > (long) sizeof(long) || *lineno >= DBI_MAX_PROG_SIZE) {
             compile_error("line number exceeds maximum value of %d", DBI_MAX_PROG_SIZE - 1);
             global_lineno = -1;
             return -1;
@@ -703,21 +705,15 @@ static int compile_string(char *input, struct Memory *memory, struct Bytecode *b
 
 static int compile_int(char *input, struct Memory *memory, struct Bytecode *bytecode)
 {
-    char *init_input = input;
-
-    int sign = 1;
-    if (*input == '-') {
-        sign = -1;
-        input++;
-    } else if (*input == '+') {
-        input++;
-    }
-    ignore_whitespace(&input);
-
-    int num = 0;
-    while (isdigit(*input)) {
-        num = 10 * num + sign * (*input - '0');
-        input++;
+    char *end;
+    errno = 0;
+    long num = strtol(input, &end, 10);
+    if (errno != 0) {
+        compile_error("%s", strerror(errno));
+        return 0;
+    } else if (end == input) {
+        compile_error("expected a number");
+        return 0;
     }
 
     int mem_loc = memory_add_int(memory, num);
@@ -728,7 +724,7 @@ static int compile_int(char *input, struct Memory *memory, struct Bytecode *byte
     // Add location of object to bytecode
     bytecode_add(bytecode, OP_PUSH);
     bytecode_add(bytecode, mem_loc);
-    return input - init_input;
+    return end - input;
 }
 
 static int compile_var(char *input, struct Memory *memory, struct Bytecode *bytecode)
@@ -1009,11 +1005,11 @@ static int parse_relop(char *input, enum Opcode *op)
 
 static int compile_statement(char *input, struct ForeignCall *foreign_calls,
         struct Memory *memory, struct Bytecode *bytecode,
-        int lineno, enum Command *command_ptr);
+        long lineno, enum Command *command_ptr);
 
 static int compile_if(char *input, struct ForeignCall *foreign_calls, 
         struct Memory *memory, struct Bytecode *bytecode,
-        int lineno, enum Command *command_ptr)
+        long lineno, enum Command *command_ptr)
 {
     char *init_input = input;
 
@@ -1094,7 +1090,7 @@ static int compile_input(char *input, struct Bytecode *bytecode)
     char *init_input = input;
     bool comma = false;
     uint32_t flags = 0;
-    uint8_t count = 0; // Can just put this in bytecode, since it's always less than MAX_VARS
+    uint8_t count = 0; // Can just put this in bytecode, since it's always less than DBI_MAX_VARS
 
     bytecode_add(bytecode, OP_INPUT);
 
@@ -1191,7 +1187,7 @@ static bool compile_foreign(struct ForeignCall *foreign_call, struct Memory *mem
 
 static int compile_statement(char *input, struct ForeignCall *foreign_calls,
         struct Memory *memory, struct Bytecode *bytecode,
-        int lineno, enum Command *command_ptr)
+        long lineno, enum Command *command_ptr)
 {
     char *init_input = input;
 
@@ -1299,8 +1295,8 @@ static int compile_statement(char *input, struct ForeignCall *foreign_calls,
                 return 0;
             }
             if (foreign_calls->argc != 0) {
-                chars_parsed = compile_print_like(input, memory, bytecode, OP_FFI_ARG,
-                        foreign_calls->argc);
+                enum Opcode op = foreign_calls->is_macro ? OP_FFI_MACRO_ARG : OP_FFI_ARG;
+                chars_parsed = compile_print_like(input, memory, bytecode, op, foreign_calls->argc);
                 if (!chars_parsed) {
                     return 0;
                 }
@@ -1348,7 +1344,7 @@ static struct Statement *compile_line(char *input, struct ForeignCall *foreign_c
     char *init_input = input;
 
     // Get line number
-    int lineno = 0;
+    long lineno = 0;
     int chars_parsed = parse_lineno(input, &lineno);
     if (chars_parsed == -1) {
         return NULL;
@@ -1395,7 +1391,7 @@ struct Runtime {
     void *context;
     bool run_file;
     struct Statement *input_stmt;
-    int lineno;
+    long lineno;
     char *filename;
     int callstack_offset;
     int *callstack;
@@ -1429,8 +1425,8 @@ DbiRuntime dbi_runtime_new(void)
 {
     struct Runtime *runtime = malloc(sizeof(*runtime));
     memset(runtime, 0, sizeof(*runtime));
-    runtime->vars = calloc(MAX_VARS, sizeof(*runtime->vars));
-    objs_init(runtime->vars, MAX_VARS);
+    runtime->vars = calloc(DBI_MAX_VARS, sizeof(*runtime->vars));
+    objs_init(runtime->vars, DBI_MAX_VARS);
     runtime->lineno = 1;
 
     // Shouldn't be possible to have more command args than memory
@@ -1458,7 +1454,7 @@ static void dbi_runtime_reset(struct Runtime *runtime)
 void dbi_runtime_free(DbiRuntime dbi)
 {
     struct Runtime *runtime = (struct Runtime *) dbi;
-    objs_free(runtime->vars, MAX_VARS);
+    objs_free(runtime->vars, DBI_MAX_VARS);
     if (runtime->input_stmt) {
         statement_free(runtime->input_stmt);
         runtime->input_stmt = NULL;
@@ -1475,7 +1471,7 @@ void dbi_runtime_free(DbiRuntime dbi)
 void dbi_runtime_error(DbiRuntime dbi, const char *fmt, ...)
 {
     struct Runtime *runtime = (struct Runtime *) dbi;
-    int old_lineno = global_lineno;
+    long old_lineno = global_lineno;
     global_lineno = runtime->lineno;
 
     va_list args;
@@ -1487,7 +1483,7 @@ void dbi_runtime_error(DbiRuntime dbi, const char *fmt, ...)
 }
 
 #define runtime_error(lineno, ...) do {\
-    int old_lineno = global_lineno;\
+    long old_lineno = global_lineno;\
     global_lineno = lineno;\
     compile_error(__VA_ARGS__);\
     global_lineno = old_lineno;\
@@ -1632,13 +1628,13 @@ static enum DbiStatus execute_line(
     int *callstack = runtime->callstack;
 
     struct DbiObject *obj;
-    int ip = 0;
+    long ip = 0;
 
     // Forward declarations since clang doesn't like these in switch
-    int mem_loc, count;
-    int lnum, rnum;
-    int cmp;
-    int iter = 0;
+    long mem_loc, count;
+    long lnum, rnum;
+    long cmp;
+    long iter = 0;
 
     while (true) {
         uint8_t op = stmt->bytecode->array[ip];
@@ -1652,7 +1648,7 @@ static enum DbiStatus execute_line(
             if (i != 0) printf(", ");
             struct DbiObject *obj = stmt->memory->array[i];
             if (obj->type == DBI_INT) {
-                printf("%d", obj->bint);
+                printf("%ld", obj->bint);
             } else if (obj->type == DBI_STR) {
                 printf("%s", obj->bstr);
             } else {
@@ -1868,6 +1864,12 @@ static enum DbiStatus execute_line(
                 }
                 runtime->ffi_argc++;
                 break;
+            case OP_FFI_MACRO_ARG:
+                assert(runtime->ffi_argc < DBI_MAX_LINE_MEMORY);
+                obj = pop();
+                bobj_copy(runtime->ffi_argv[runtime->ffi_argc], obj);
+                runtime->ffi_argc++;
+                break;
             case OP_FFI_CALL:
                 obj = pop();
                 runtime->lineno = stmt->lineno;
@@ -1978,7 +1980,7 @@ static enum DbiStatus print_help(DbiRuntime dbi)
 
 // Loads provided file then executes RUN command
 // If filename is NULL it will drop into the REPL and not execute RUN
-bool dbi_repl(DbiProgram prog, char *input_file_name)
+static bool repl(DbiProgram prog, char *input_file_name, void *context)
 {
     struct Program *program = (struct Program *) prog;
     bool run_file;
@@ -2015,6 +2017,10 @@ bool dbi_repl(DbiProgram prog, char *input_file_name)
     bool input_error = false;
 
     DbiRuntime dbi = runtime_new_with_program(program);
+    if (context) {
+        dbi_set_context(dbi, context);
+    }
+
     struct Runtime *runtime = (struct Runtime *) dbi;
 
     while (true) {
@@ -2097,6 +2103,16 @@ bool dbi_repl(DbiProgram prog, char *input_file_name)
     }
     dbi_runtime_free(dbi);
     return global_err_msg[0] == '\0';
+}
+
+bool dbi_repl(DbiProgram prog, char *input_file_name)
+{
+    return repl(prog, input_file_name, NULL);
+}
+
+bool dbi_repl_with_context(DbiProgram prog, char *input_file_name, void *context)
+{
+    return repl(prog, input_file_name, context);
 }
 
 struct Code {
@@ -2244,12 +2260,13 @@ bool dbi_compile_string(DbiProgram prog, char *text)
     return ret;
 }
 
-void register_command(DbiProgram prog, char *name, DbiForeignCall call, int argc, char *docstring, char *example)
+void register_command(DbiProgram prog, char *name, DbiForeignCall call, int argc, char *docstring, char *example, bool is_macro)
 {
     assert(argc >= -1);
     struct Program *program = (struct Program *) prog;
     assert(!program->has_compiled);
     struct ForeignCall *fc = malloc(sizeof(*fc));
+    fc->is_macro = is_macro;
     fc->argc = argc;
     fc->name = name;
     fc->docstring = docstring;
@@ -2285,12 +2302,22 @@ void register_command(DbiProgram prog, char *name, DbiForeignCall call, int argc
 
 void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int argc)
 {
-    register_command(prog, name, call, argc, NULL, NULL);
+    register_command(prog, name, call, argc, NULL, NULL, false);
 }
 
 void dbi_register_command_with_info(DbiProgram prog, char *name, DbiForeignCall call, int argc, char *docstring, char *example)
 {
-    register_command(prog, name, call, argc, docstring, example);
+    register_command(prog, name, call, argc, docstring, example, false);
+}
+
+void dbi_register_macro(DbiProgram prog, char *name, DbiForeignCall call, int argc)
+{
+    register_command(prog, name, call, argc, NULL, NULL, true);
+}
+
+void dbi_register_macro_with_info(DbiProgram prog, char *name, DbiForeignCall call, int argc, char *docstring, char *example)
+{
+    register_command(prog, name, call, argc, docstring, example, true);
 }
 
 // Executes program in runtime
@@ -2350,11 +2377,26 @@ void dbi_set_var(DbiRuntime dbi, char var, struct DbiObject *obj)
 {
     struct Runtime *runtime = (struct Runtime *) dbi;
     assert((var >= 'a' && var <= 'z') || (var >= 'A' && var <= 'Z'));
+    assert(obj);
+    if (obj->type == DBI_VAR) {
+        obj = dbi_get_var(dbi, obj->bvar);
+    }
+    assert(obj->type != DBI_VAR);
     int offset = var >= 'a' ? 'a' : 'A';
-    memcpy(runtime->vars[var - offset], obj, sizeof(*obj));
+    struct DbiObject *varobj = runtime->vars[var - offset];
+    if (varobj->type == DBI_STR && varobj->bstr != NULL) {
+        free(varobj->bstr);
+    }
+    if (obj->type == DBI_STR) {
+        varobj->type = DBI_STR;
+        varobj->bstr = obj->bstr ? strdup(obj->bstr) : NULL;
+    } else {
+        varobj->type = DBI_INT;
+        varobj->bint = obj->bint;
+    }
 }
 
-char *dbi_get_line(DbiProgram prog, int lineno)
+char *dbi_get_line(DbiProgram prog, long lineno)
 {
     assert(lineno > 0);
     assert(lineno < DBI_MAX_PROG_SIZE);

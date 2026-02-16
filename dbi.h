@@ -26,18 +26,23 @@
 // Can be useful if embedding dbi into a non-cli application
 #ifndef DBI_DISABLE_IO
 #define DBI_DISABLE_IO 0
+
 #endif
 
+// Hardcoded since variables can only be A-Z 
+// Do not update
+#define DBI_MAX_VARS 26
+
 enum DbiType {
-    DBI_INT,
-    DBI_STR,
-    DBI_VAR
+    DBI_INT = 0,
+    DBI_STR = 1,
+    DBI_VAR = 2
 };
 
 struct DbiObject {
     enum DbiType type;
     union {
-        int bint;
+        long bint;
         char *bstr;
         uint8_t bvar;
     };
@@ -63,6 +68,10 @@ typedef enum DbiStatus (*DbiForeignCall)(DbiRuntime dbi);
 // `doc` can contain up to 50 characters of documentation text.
 void dbi_register_command(DbiProgram prog, char *name, DbiForeignCall call, int argc);
 void dbi_register_command_with_info(DbiProgram prog, char *name, DbiForeignCall call, int argc, char *docstring, char *example);
+
+// Registering a macro is the same as registering a command, except that it doesn't evaluate variables passed in
+void dbi_register_macro(DbiProgram prog, char *name, DbiForeignCall call, int argc);
+void dbi_register_macro_with_info(DbiProgram prog, char *name, DbiForeignCall call, int argc, char *docstring, char *example);
 
 // Note: all C function commands must be registered before compilation.
 //       dbi_compile_* functions can be called multiple times with different inputs. If the line
@@ -108,9 +117,10 @@ void dbi_set_var(DbiRuntime dbi, char var, struct DbiObject *obj);
 // If you just want to interactively run a BASIC script, use this (passing NULL for the file name
 // just drops you into repl)
 bool dbi_repl(DbiProgram prog, char *input_file_name);
+bool dbi_repl_with_context(DbiProgram prog, char *input_file_name, void *context);
 
 // Get text of line at given number
-char *dbi_get_line(DbiProgram prog, int lineno);
+char *dbi_get_line(DbiProgram prog, long lineno);
 
 // Print out human readable bytecode of program
 void dbi_print_compiled(DbiProgram prog);

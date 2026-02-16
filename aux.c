@@ -29,7 +29,7 @@ static void aux_big_print_obj(struct DbiObject *obj)
     if (obj->type == DBI_INT) {
         len = 3 * sizeof(int) + 2;
         strbuff = calloc(len, 1);
-        snprintf(strbuff, len, "%d", obj->bint);
+        snprintf(strbuff, len, "%ld", obj->bint);
     } else if (obj->type == DBI_STR) {
         len = strlen(obj->bstr) + 1;
         strbuff = calloc(len, 1);
@@ -74,7 +74,7 @@ static enum DbiStatus aux_sleep(DbiRuntime dbi)
 static void aux_print_obj(struct DbiObject *obj)
 {
     if (obj->type == DBI_INT) {
-        printf("%d", obj->bint);
+        printf("%ld", obj->bint);
     } else if (obj->type == DBI_STR) {
         printf("%s", obj->bstr);
     } else {
