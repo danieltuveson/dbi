@@ -1444,6 +1444,7 @@ static DbiRuntime runtime_new_with_program(struct Program *program)
     return (DbiRuntime)runtime;
 }
 
+// Allows runtime to be re-used if program has finished
 static void dbi_runtime_reset(struct Runtime *runtime)
 {
     runtime->callstack_offset = 0;
@@ -2328,12 +2329,14 @@ enum DbiStatus dbi_run(DbiRuntime dbi, DbiProgram prog)
     struct Program *program = (struct Program *) prog;
     runtime->program = program;
     struct Statement *stmt = statement_next(program->statements, runtime->lineno);
-    assert(stmt);
+    if (!stmt) {
+        dbi_runtime_reset(runtime);
+        return DBI_STATUS_FINISHED;
+    }
     enum DbiStatus status = execute_line(runtime, stmt, program, true);
     if (status == DBI_STATUS_YIELD) {
         return status;
     } else {
-        // Allows runtime to be re-used if program has finished
         dbi_runtime_reset(runtime);
         return status;
     }
